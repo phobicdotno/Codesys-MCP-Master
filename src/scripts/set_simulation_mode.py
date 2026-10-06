@@ -17,6 +17,10 @@ try:
     before = bool(dev.get_simulation_mode())
     after = before
     if ENABLE is not None and bool(ENABLE) != before:
+        # The change is saved; never save other unsaved work along with it.
+        if getattr(primary_project, "dirty", False):
+            raise RuntimeError("The project has unsaved changes. Save them (save_project) or discard them first; "
+                               "set_simulation_mode saves the project after the change.")
         dev.set_simulation_mode(bool(ENABLE))
         after = bool(dev.get_simulation_mode())
         if after != bool(ENABLE):

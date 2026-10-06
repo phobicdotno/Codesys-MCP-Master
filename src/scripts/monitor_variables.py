@@ -9,7 +9,7 @@ EXPRESSIONS = {EXPRESSIONS_PY}
 DURATION_MS = {DURATION_MS}
 INTERVAL_MS = {INTERVAL_MS}
 INCLUDE_SAMPLES = {INCLUDE_SAMPLES}
-MAX_SAMPLES = 2000
+MAX_SAMPLES = 10000  # a 600 s window at 60 ms; reported as truncated if hit
 
 
 def _num(v):
@@ -75,6 +75,7 @@ try:
         "duration_ms": round((time.time() - t0) * 1000.0),
         "interval_ms": INTERVAL_MS,
         "samples": n,
+        "truncated": n >= MAX_SAMPLES,
         "variables": summary,
     }, indent=1))
     print("### MONITOR_END ###")

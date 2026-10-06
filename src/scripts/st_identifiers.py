@@ -13,6 +13,10 @@ import re as _st_re
 
 _ST_IDENT = _st_re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+# Elementary types that prefix typed literals (T#1s, DINT#5, BOOL#1).
+_ST_LITERAL_TYPES = set("""T TIME LTIME D DATE LDATE TOD TIME_OF_DAY LTOD DT DATE_AND_TIME LDT BOOL BYTE WORD
+DWORD LWORD SINT INT DINT LINT USINT UINT UDINT ULINT REAL LREAL STRING WSTRING CHAR WCHAR""".split())
+
 
 def st_identifier_spans(text):
     """(start, end) of every identifier token outside comments, strings,
@@ -64,17 +68,29 @@ def st_identifier_spans(text):
             continue
         m = _ST_IDENT.match(text, i)
         if m:
-            # a number like 1e5 or 2#1010 starts with a digit and is skipped
-            # below; an identifier never follows a digit directly
-            if i > 0 and text[i - 1].isdigit():
+            # The type prefix of a typed literal (T#1s, DINT#5, TOD#12:00) is
+            # not a name; an enum type before '#' (E_Mode#Run) is.
+            if m.end() < n and text[m.end()] == "#" and m.group(0).upper() in _ST_LITERAL_TYPES:
                 i = m.end()
                 continue
             spans.append((m.start(), m.end()))
             i = m.end()
             continue
         if c.isdigit():
-            while i < n and (text[i].isalnum() or text[i] in "_."):
-                i += 1
+            # A number: digits, '_', one '.' followed by a digit (not the '..'
+            # of an array range: ARRAY[1..nMax]), an exponent. Letters end it.
+            i += 1
+            while i < n:
+                ch = text[i]
+                if ch.isdigit() or ch == "_":
+                    i += 1
+                elif ch == "." and i + 1 < n and text[i + 1].isdigit():
+                    i += 1
+                elif ch in "eE" and i + 1 < n and (text[i + 1].isdigit() or
+                                                   (text[i + 1] in "+-" and i + 2 < n and text[i + 2].isdigit())):
+                    i += 2
+                else:
+                    break
             continue
         i += 1
     return spans
@@ -96,26 +112,44 @@ def st_find_identifier(text, name):
             continue
         while li + 1 < len(starts) and starts[li + 1] <= a:
             li += 1
-        q = ""
-        k = a - 1
-        while k >= 0 and text[k] in " \t":
-            k -= 1
-        if k >= 0 and text[k] == ".":
-            e = k
-            k -= 1
-            while k >= 0 and text[k] in " \t":
-                k -= 1
-            s = k
-            while s >= 0 and (text[s].isalnum() or text[s] == "_"):
-                s -= 1
-            q = text[s + 1:e].strip() + "."
         found.append({
             "line": li + 1,
             "column": a - starts[li] + 1,
-            "qualifier": q,
+            "qualifier": _st_qualifier(text, a),
             "text": lines[li].rstrip("\r"),
         })
     return found
+
+
+def _st_qualifier(text, a):
+    """The access path in front of position a: 'fb.out.' in fb.out.x,
+    'arr[i].' in arr[i].x, 'p^.' in p^.x; '' when there is none."""
+    k = a - 1
+    while k >= 0 and text[k] in " \t":
+        k -= 1
+    if k < 0 or text[k] != ".":
+        return ""
+    end = k + 1
+    while k >= 0 and text[k] == ".":
+        k -= 1
+        while k >= 0 and text[k] in " \t":
+            k -= 1
+        # one path element: identifier, optionally followed by [..] and/or ^
+        while k >= 0 and text[k] in "^]":
+            if text[k] == "]":
+                depth = 0
+                while k >= 0:
+                    if text[k] == "]":
+                        depth += 1
+                    elif text[k] == "[":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    k -= 1
+            k -= 1
+        while k >= 0 and (text[k].isalnum() or text[k] == "_"):
+            k -= 1
+    return text[k + 1:end].replace(" ", "").replace("\t", "")
 
 
 def st_replace_identifier(text, name, new_name):

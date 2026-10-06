@@ -34,16 +34,17 @@ try:
         if DEVICE_TYPE is not None and dtype != DEVICE_TYPE:
             continue
         matched += 1
-        if len(rows) < LIMIT:
-            rows.append({
-                "name": name,
-                "vendor": vendor,
-                "type": dtype,
-                "id": _s(getattr(did, "id", "")),
-                "version": _s(getattr(did, "version", "")),
-                "description": _s(getattr(info, "description", ""))[:160],
-            })
+        rows.append({
+            "name": name,
+            "vendor": vendor,
+            "type": dtype,
+            "id": _s(getattr(did, "id", "")),
+            "version": _s(getattr(did, "version", "")),
+            "description": _s(getattr(info, "description", ""))[:160],
+        })
+    # sort all matches first, then cut: the shown ones are the first in order
     rows.sort(key=lambda r: (r["vendor"].lower(), r["name"].lower(), r["version"]))
+    rows = rows[:LIMIT]
     print("### DEVICES_START ###")
     print(json.dumps({"installed": len(all_devs), "matched": matched, "shown": len(rows), "devices": rows}, indent=1))
     print("### DEVICES_END ###")

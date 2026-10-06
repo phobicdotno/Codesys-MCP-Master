@@ -3094,7 +3094,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'set_simulation_mode',
-    "Reads or sets a device's simulation mode. With simulation on, logging in runs the application in CODESYS's built-in simulator instead of on the PLC, so logic can be tested without hardware. Omit 'enabled' to only read it. Change it while logged out; the project is saved after a change.",
+    "Reads or sets a device's simulation mode. With simulation on, logging in runs the application in CODESYS's built-in simulator instead of on the PLC, so logic can be tested without hardware. Omit 'enabled' to only read it. Change it while logged out. The project is saved after a change, so a project with other unsaved changes is refused: save or discard them first.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       enabled: z.boolean().optional().describe("true = simulation on, false = off. Omit to only read the current mode."),
