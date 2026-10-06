@@ -6,6 +6,14 @@ Until v0.19.0 the project was called Codesys-MCP-SP21+ (npm package `codesys-mcp
 
 ## Unreleased
 
+- **Five new tools and library checking** (written for this project; the ideas, not code, come from later versions of the upstream project):
+  - `find_references` and `rename_symbol`: CODESYS's scripting API has no cross-reference or refactoring call, so both read the textual code with their own Structured Text lexer (comments, strings, pragmas and typed literals skipped, identifiers matched case-insensitively). `rename_symbol` is a dry run by default and refuses invalid names, reserved words and names already in use.
+  - `monitor_variables`: samples variables over a time window and summarises them (first, last, min, max, changes, optional series).
+  - `set_simulation_mode`: reads or sets a device's simulation mode, so the application runs in CODESYS's simulator without a PLC.
+  - `list_device_repository`: lists installed device descriptions, filtered.
+  - `compile_project` checks a library project (no application) with "Check all Pool Objects".
+  - Verified on SP21: references and a rename across two POUs (comment and string text untouched, 0 compile errors after), the simulator running with `nCycles` sampled rising, a library with a deliberate error reporting it. The library and simulation calls exist on SP18, SP21 and SP22.
+- README: a section on working in natural language, and how much upstream code remains (about 13%).
 - **Watcher 0.7.1: non-ASCII results and no endless re-runs** (ported from PR #25 by Andrei-Errapart). CODESYS's own json library raised on any character in U+0080..U+00FF, so localized output (a German install's compiler messages) was never written and the call timed out although it had run; results are now written as UTF-8 with `ensure_ascii=False`, with an ASCII fallback report. And when a result write failed, the command file stayed, so the next tick ran the same command again every 50 ms forever (a download would repeat); the command file is now always removed. Verified on SP21: umlauts, a dash and CJK text came through byte-exact on the output and the error path.
 - Installs straight from GitHub while the npm package waits: `npm i -g github:phobicdotno/Codesys-MCP-Master` (a `prepare` script builds `dist/`, which is not in git).
 - Release text written into vessel repos no longer contains " -- ": the classifier evidence lines (commit message and the auto-appended Changelog entry) use ";" or ":". Seen on a sha-fallback release ("touch -- classifying as build bump", a vessel project v1.1.1.1). A unit test keeps it out.

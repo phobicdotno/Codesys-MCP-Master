@@ -14,7 +14,7 @@ If vitest ever hangs before running a test, check that `package.json` has no UTF
 ```
 src/
   bin.ts              CLI entry point
-  server.ts           MCP tool/resource registration (127 tools, 3 resources)
+  server.ts           MCP tool/resource registration (132 tools, 3 resources)
   launcher.ts         CODESYS process management
   ipc.ts              File-based IPC transport
   headless.ts         Headless fallback executor

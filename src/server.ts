@@ -3003,6 +3003,141 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     }
   );
 
+  // ─── References, refactoring, monitoring, simulation, device repository ───
+  // CODESYS's scripting API has no cross-reference or refactoring call, so
+  // find_references / rename_symbol read the textual code themselves
+  // (src/scripts/st_identifiers.py: comments, strings, pragmas and typed
+  // literals skipped, identifiers matched case-insensitively).
+
+  s.tool(
+    'find_references',
+    "Finds every use of an identifier (variable, POU, type, method, constant...) in the project's textual code: declarations and implementations of POUs, methods, properties, actions, DUTs, GVLs and interfaces. Comments, strings and pragmas are skipped; matching is case-insensitive like IEC 61131-3. Each hit gives object, part (declaration/implementation), line, column, the qualifier in front of it (e.g. 'PLC_PRG.') and the source line. Matching is by name, so same-named variables in different POUs all show up; graphical bodies (FBD/LD/CFC/SFC) are not searched and are listed. Offline, read-only.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      name: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'An IEC identifier').describe("The identifier to find, e.g. 'bStart' or 'FB_Motor'."),
+      maxResults: z.number().int().positive().optional().describe("Most hits to list (all are counted). Default 500."),
+    },
+    async (args: { projectFilePath: string; name: string; maxResults?: number }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'find_references',
+        { PROJECT_FILE_PATH: escaped, NAME_PY: pyStringLiteral(args.name), MAX_RESULTS: String(args.maxResults ?? 500) },
+        ['ensure_project_open', 'st_identifiers']
+      );
+      const result = await executor.executeScript(script);
+      if (!(result.success && result.output.includes('SCRIPT_SUCCESS'))) return formatToolResponse(result, '');
+      return { content: [{ type: 'text' as const, text: extractMarkerText(result.output, '### REFERENCES_START ###', '### REFERENCES_END ###') }], isError: false };
+    }
+  );
+
+  s.tool(
+    'rename_symbol',
+    "Renames an identifier everywhere in the project's textual code, and the object of that name too (POU, DUT, GVL, method...). DRY RUN BY DEFAULT: it reports what would change; pass dryRun=false to apply (the project is then saved). Refuses an invalid identifier, a reserved word, or a new name that is already used. Matching is by name and case-insensitive, so same-named variables in different POUs are renamed together unless 'objects' limits the scope. Graphical bodies (FBD/LD/CFC/SFC) are not changed and are listed. Compile afterwards to confirm.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      oldName: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'An IEC identifier').describe("Current identifier."),
+      newName: z.string().describe("New identifier."),
+      dryRun: z.boolean().optional().describe("Default true: only report. false: apply and save."),
+      objects: z.array(z.string()).optional().describe("Limit to these object paths (and their children), e.g. ['Application/PLC_PRG']. Default: the whole project."),
+    },
+    async (args: { projectFilePath: string; oldName: string; newName: string; dryRun?: boolean; objects?: string[] }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const objectsPy = '[' + (args.objects ?? []).map((o) => pyStringLiteral(sanitizePouPath(o))).join(', ') + ']';
+      const script = scriptManager.prepareScriptWithHelpers(
+        'rename_symbol',
+        {
+          PROJECT_FILE_PATH: escaped,
+          OLD_PY: pyStringLiteral(args.oldName),
+          NEW_PY: pyStringLiteral(args.newName.trim()),
+          DRY_RUN: pyBool(args.dryRun !== false),
+          OBJECTS_PY: objectsPy,
+        },
+        ['ensure_project_open', 'st_identifiers']
+      );
+      const result = await executor.executeScript(script);
+      if (!(result.success && result.output.includes('SCRIPT_SUCCESS'))) return formatToolResponse(result, '');
+      return { content: [{ type: 'text' as const, text: extractMarkerText(result.output, '### RENAME_START ###', '### RENAME_END ###') }], isError: false };
+    }
+  );
+
+  s.tool(
+    'monitor_variables',
+    "Samples variables of the running PLC application over a time window and summarises each one: number of samples, first and last value, min and max (numeric and BOOL values), and how often it changed; optionally the raw time series. One read_values call per sample for all expressions. Must be connected (logs in if needed). For a single snapshot use read_variables.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      applicationPath: z.string().optional().describe(APP_PATH_DESC),
+      expressions: z.array(z.string()).min(1).describe("Variable expressions, e.g. ['PLC_PRG.nCounter', 'GVL.bAlarm']."),
+      durationSeconds: z.number().positive().max(600).optional().describe("How long to sample. Default 5, max 600."),
+      intervalMs: z.number().int().min(10).optional().describe("Time between samples. Default 200."),
+      includeSamples: z.boolean().optional().describe("Also return every sample as [ms, value] pairs. Default false."),
+    },
+    async (args: { projectFilePath: string; applicationPath?: string; expressions: string[]; durationSeconds?: number; intervalMs?: number; includeSamples?: boolean }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const durationMs = Math.round((args.durationSeconds ?? 5) * 1000);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'monitor_variables',
+        {
+          PROJECT_FILE_PATH: escaped,
+          APPLICATION_PATH: appPathLiteral(args.applicationPath),
+          EXPRESSIONS_PY: '[' + args.expressions.map((e) => pyStringLiteral(e.trim())).join(', ') + ']',
+          DURATION_MS: String(durationMs),
+          INTERVAL_MS: String(args.intervalMs ?? 200),
+          INCLUDE_SAMPLES: pyBool(args.includeSamples === true),
+        },
+        ONLINE_HELPERS
+      );
+      const result = await executor.executeScript(script, durationMs + 180_000);
+      if (!(result.success && result.output.includes('SCRIPT_SUCCESS'))) return formatToolResponse(result, '');
+      return { content: [{ type: 'text' as const, text: extractMarkerText(result.output, '### MONITOR_START ###', '### MONITOR_END ###') }], isError: false };
+    }
+  );
+
+  s.tool(
+    'set_simulation_mode',
+    "Reads or sets a device's simulation mode. With simulation on, logging in runs the application in CODESYS's built-in simulator instead of on the PLC, so logic can be tested without hardware. Omit 'enabled' to only read it. Change it while logged out; the project is saved after a change.",
+    {
+      projectFilePath: z.string().describe("Path to the project file."),
+      enabled: z.boolean().optional().describe("true = simulation on, false = off. Omit to only read the current mode."),
+      devicePath: z.string().optional().describe("Device object path. Default: the device of the active application."),
+    },
+    async (args: { projectFilePath: string; enabled?: boolean; devicePath?: string }) => {
+      const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      const script = scriptManager.prepareScriptWithHelpers(
+        'set_simulation_mode',
+        {
+          PROJECT_FILE_PATH: escaped,
+          DEVICE_PATH_PY: pyStringLiteral(args.devicePath ? sanitizePouPath(args.devicePath) : ''),
+          ENABLE: args.enabled === undefined ? 'None' : pyBool(args.enabled),
+        },
+        ['ensure_project_open', 'find_object_by_path', 'find_device_object']
+      );
+      const result = await executor.executeScript(script);
+      return formatToolResponse(result, result.output.split('\n').filter((l) => /^(Device|Simulation mode):/.test(l.trim())).join('\n'));
+    }
+  );
+
+  s.tool(
+    'list_device_repository',
+    "Lists the device descriptions installed in the local device repository (shared by every CODESYS install on this PC), with name, vendor, type, id, version and description. Filter by name and vendor substring and device type; the list is capped by 'limit'. Use the type/id/version with add_device or update_device_type. Read-only, no project needed.",
+    {
+      nameContains: z.string().optional().describe("Only devices whose name contains this (case-insensitive)."),
+      vendorContains: z.string().optional().describe("Only devices whose vendor contains this (case-insensitive)."),
+      deviceType: z.number().int().optional().describe("Only this device type number (e.g. 4096 for PLCs)."),
+      limit: z.number().int().positive().max(2000).optional().describe("Most devices to list (all are counted). Default 100."),
+    },
+    async (args: { nameContains?: string; vendorContains?: string; deviceType?: number; limit?: number }) => {
+      const script = scriptManager.prepareScript('list_device_repository', {
+        NAME_PY: pyStringLiteral(args.nameContains ?? ''),
+        VENDOR_PY: pyStringLiteral(args.vendorContains ?? ''),
+        DEVICE_TYPE: args.deviceType === undefined ? 'None' : String(args.deviceType),
+        LIMIT: String(args.limit ?? 100),
+      });
+      const result = await executor.executeScript(script, 180_000);
+      if (!(result.success && result.output.includes('SCRIPT_SUCCESS'))) return formatToolResponse(result, '');
+      return { content: [{ type: 'text' as const, text: extractMarkerText(result.output, '### DEVICES_START ###', '### DEVICES_END ###') }], isError: false };
+    }
+  );
+
   // ─── Online/Runtime Tools ─────────────────────────────────────────────
 
   s.tool(

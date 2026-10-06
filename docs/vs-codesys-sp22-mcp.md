@@ -5,7 +5,7 @@ CODESYS 3.5 SP22 Patch 1 ships its own MCP server (an IDE plugin plus `CodesysMC
 | | **This MCP** | **CODESYS SP22 MCP server** |
 |---|---|---|
 | CODESYS versions | SP18, SP19, SP21, SP22 (all installs from one server since 0.19.0) | SP22 Patch 1 and newer only |
-| Tools | 127 | 19 |
+| Tools | 132 | 19 |
 | Scope | Whole workflow: project, code, build, online, download, release, git | Code assistant for the project that is already open |
 | Open / save / create project | Yes | No |
 | Online (login, download, variables, boot app) | Yes | No |

@@ -277,6 +277,39 @@ try:
     target_app = None
     app_name = "N/A"
 
+    # A library project has no application to build: CODESYS checks it with
+    # "Check all Pool Objects" (IScriptProject5.check_all_pool_objects), and
+    # the results land in the same message categories.
+    _is_library = PROJECT_FILE_PATH.lower().endswith(".library")
+    if not _is_library:
+        try:
+            _is_library = primary_project.active_application is None and not any(
+                getattr(c, 'is_application', False) for c in primary_project.get_children(True))
+        except Exception:
+            _is_library = False
+    if _is_library:
+        if not hasattr(primary_project, 'check_all_pool_objects'):
+            raise RuntimeError("This CODESYS version cannot check a library project by script (no check_all_pool_objects).")
+        print("DEBUG: library project: check_all_pool_objects()")
+        try:
+            script_engine.system.clear_messages()
+        except Exception:
+            pass
+        primary_project.check_all_pool_objects()
+        messages = _extract_all_messages(None, script_engine)
+        messages_json, errors, warnings, infos, others = _render_messages_block(messages)
+        print("### COMPILE_MESSAGES_START ###")
+        print(messages_json)
+        print("### COMPILE_MESSAGES_END ###")
+        print("Checked library (all pool objects): %s" % project_name)
+        print("Errors: %d" % errors)
+        print("Warnings: %d" % warnings)
+        print("Infos: %d" % infos)
+        print("Others: %d" % others)
+        print("Total: %d" % len(messages))
+        print("SCRIPT_SUCCESS: Library checked (Check all Pool Objects).")
+        sys.exit(0)
+
     try:
         target_app = primary_project.active_application
         if target_app:

@@ -1,6 +1,6 @@
 # MCP Tools & Resources
 
-127 tools across the categories below. Tools marked **NEW** were added in this fork; tools marked **FIXED** existed upstream but were broken before this fork.
+132 tools across the categories below. Tools marked **NEW** were added in this fork; tools marked **FIXED** existed upstream but were broken before this fork.
 
 ## Management Tools
 
@@ -20,7 +20,7 @@
 | `open_project` | Open an existing CODESYS project file (cross-project switch **FIXED**; SP-mismatch pre-flight **NEW**; refuses to switch away from a project with unsaved changes instead of silently saving it, v0.17.0) |
 | `create_project` | Create a new project in the current storage format: device (default CODESYS Control Win V3 x64), Application, PLC_PRG, MainTask |
 | `save_project` | Save the currently open project |
-| `compile_project` | Build the primary application with structured error output (120s timeout) - JSON `long` **FIXED** |
+| `compile_project` | Build the primary application with structured error output (120s timeout) - JSON `long` **FIXED**. A library project (no application) is checked with "Check all Pool Objects" instead |
 | `get_compile_messages` | Retrieve last compiler messages without triggering a new build - JSON `long` **FIXED** |
 
 `open_project` runs an offline pre-flight (`projectinspectiondata.auxiliary` ZIP+XML - no CODESYS) that compares the project's saved profile against the install the call was routed to (with several installs the server already picks the matching one; see installs-and-profiles.md). Exact match proceeds silently; same-SP-different-patch proceeds with a one-line warning (CODESYS will pop its patch-difference dialog); SP mismatch refuses without opening so the project isn't dragged through a downgrade/upgrade conversion. With several installs the router already sends the call to an install of the project's SP, or refuses when none is installed; this check matters for a server bound to one install (`--codesys-path`). If the inspection itself fails (file missing, malformed .project, non-standard profile name), pre-flight falls through silently and the existing CODESYS open path produces its native error.
@@ -40,6 +40,8 @@
 | `rename_object` | Rename any project object |
 | `move_object` | Move an object to a new parent in the tree |
 | `get_all_pou_code` | Bulk read all declaration and implementation code in the project (120s timeout) |
+| `find_references` | **NEW** - every use of an identifier in the textual code (declarations and implementations of POUs, methods, properties, actions, DUTs, GVLs, interfaces): object, part, line, column, qualifier. Comments, strings and pragmas are skipped, matching is case-insensitive; graphical bodies are listed as not searched |
+| `rename_symbol` | **NEW** - rename an identifier everywhere in the textual code and the object of that name. Dry run by default; refuses invalid names, reserved words and names already in use; `objects` limits the scope |
 
 ## Online / Runtime Tools
 
@@ -56,6 +58,8 @@ Device credentials: every online tool registers them before logging in, so a PLC
 | `start_stop_application` | Start or stop the PLC application (already in the asked state counts as success) |
 | `reset_application` | **NEW** - Reset the online application: `warm` (keep retains), `cold` (clear retains), `origin` (erase application from device - destructive) |
 | `read_variables` | **NEW** - Bulk read: current values of many expressions in one call (`read_values`) |
+| `monitor_variables` | **NEW** - sample variables over a time window: samples, first, last, min, max, number of changes, optionally the time series |
+| `set_simulation_mode` | **NEW** - read or set a device's simulation mode, to run the application in CODESYS's simulator without a PLC |
 | `write_variables` | **NEW** - Bulk write: stage many expression/value pairs, commit in one `write_prepared_values` batch (same-cycle landing) |
 | `force_variables` | **NEW** - Force expression/value pairs (pinned against task writes until unforced) |
 | `unforce_variables` | **NEW** - Unforce specific expressions (optionally restoring pre-force values) or ALL forced values |
@@ -132,6 +136,7 @@ Found by diffing the live SP19 `system.dump_scripting_api()` against the tools a
 | `get_build_properties` / `set_build_properties` | Per object: exclude from build, link always, external, enable system call, compiler defines (n/a where a property does not apply). Project-wide defines are not offered: on SP21/SP22 the scripting setter does not survive save + reopen, SP19 has no such property |
 | `open_project_archive` | Extract a `.projectarchive` and open it as the primary project, always with NoUpdates (libraries, devices and compiler version stay as archived). On SP21/SP22 `open_archive` only extracts, so the tool opens the extracted project itself |
 | `install_device_description` / `find_device_description` / `remove_device_description` | Device (or vendor) descriptions in the local device repository: install a `.devdesc.xml`, check one by type/id/version, remove one |
+| `list_device_repository` | **NEW** - list installed device descriptions (name, vendor, type, id, version), filtered by name, vendor and type |
 | `plug_device` / `unplug_device` | Plug a device into a slot (given as parent + 1-based position, since every empty slot is called `<Empty>`) or unplug one. Slots come from the device description; K-Bus modules are a free child list, use `add_device` |
 | `get_library_reference` / `set_library_reference` | A library reference's options (namespace, qualified only, optional, hide when referenced as dependency, publish symbols) and its library parameters |
 | `download_missing_libraries` | Library Manager "download missing libraries" (SP21+) |
