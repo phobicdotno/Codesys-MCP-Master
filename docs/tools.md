@@ -37,7 +37,7 @@
 | `create_gvl` | Create a Global Variable List with optional initial declaration |
 | `create_folder` | Create an organizational folder in the project tree (**FIXED**) |
 | `delete_object` | Delete any project object (POU, DUT, GVL, folder, etc.) |
-| `rename_object` | Rename any project object |
+| `rename_object` | Rename any project object (only the object; use `rename_symbol` to update its uses too) |
 | `move_object` | Move an object to a new parent in the tree |
 | `get_all_pou_code` | Bulk read all declaration and implementation code in the project (120s timeout) |
 | `find_references` | **NEW** - every use of an identifier in the textual code (declarations and implementations of POUs, methods, properties, actions, DUTs, GVLs, interfaces): object, part, line, column, qualifier. Comments, strings and pragmas are skipped, matching is case-insensitive; graphical bodies are listed as not searched |

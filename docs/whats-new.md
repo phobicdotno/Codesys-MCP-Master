@@ -13,6 +13,7 @@ Relative to upstream [luke-harriman/Codesys-MCP](https://github.com/luke-harrima
 
 ## Unreleased
 
+- **Five new tools and library checking.** `find_references` and `rename_symbol` (CODESYS's scripting API has no cross-reference or refactoring call, so both read the textual code with their own Structured Text lexer; this fixes the old `rename_object` problem of callers keeping the old name), `monitor_variables` (sample variables over a time window), `set_simulation_mode` (run the application in CODESYS's simulator), `list_device_repository` (installed device descriptions). `compile_project` checks a library project with "Check all Pool Objects". Details in [tools.md](tools.md).
 - **Several CODESYS of the same install.** A CODESYS of the install that cannot be taken over (opened by hand, or used by another live MCP session) no longer blocks the launch: another instance starts next to it. Verified live: three SP21 instances started together, each driven independently with its own project. The old refusal rested on the assumption that CODESYS allows one instance per install, which is not true. `--single-instance` restores it.
 - **Project lock guard.** What does conflict is one `.project` in two instances: CODESYS pops a modal read-only prompt that hung the watcher until the command timed out (also for a stale `.~u` lock left by a killed CODESYS). `open_project` and every tool that opens a project now check the lock file first: a live owner or another PC refuses with the owner named, a stale lock on this PC is removed.
 

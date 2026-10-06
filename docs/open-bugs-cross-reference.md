@@ -200,6 +200,8 @@ fork minor version and document in release notes.
 
 ## Bug 5: `rename_object` -- updates own decl but not callers
 
+**Status (2026-10-06): solved by the separate tool `rename_symbol`**, the "Alternative" below. It renames the object and every use in the textual code with a Structured Text lexer (comments, strings, pragmas and typed literals skipped), dry run by default, and refuses reserved words and names already in use. `rename_object` itself still renames only the object. Graphical bodies (FBD, LD, CFC, SFC) are not covered.
+
 **Empirical observation** (this session, MCPTest 2026-04-25):
 `rename_object Application/ST_Sample -> ST_SampleRenamed` correctly
 updated the struct's own internal `TYPE ST_Sample :` line to
