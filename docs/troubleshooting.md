@@ -1,0 +1,67 @@
+# Execution Modes & Troubleshooting
+
+## Persistent Mode (default, SP21+ rewrite)
+
+1. Server launches `CODESYS.exe` with `--runscript=watcher.py` (no `--noUI`)
+2. CODESYS UI opens - user can see and interact with the IDE
+3. The watcher installs a **WinForms timer on the primary (UI) thread** that polls a `commands/` directory, then the script returns. Because no script stays running, CODESYS keeps its menus enabled (and on SP22 its own MCP server can be switched on alongside). Before 0.5.0 of the watcher it was a `system.delay()` loop that never returned and greyed out the menus; upstream used a background thread + `system.execute_on_primary_thread()`, which was removed in SP21
+4. When a tool is called, the server writes a `.py` script + `.command.json` to `commands/`
+5. The watcher detects the command, executes it directly on the primary thread, and writes results atomically to `results/`
+6. Changes made by tools appear in the CODESYS UI in real-time
+7. The UI remains interactive between commands - only briefly paused during synchronous API calls (compile, open)
+
+Internals (IPC protocol, atomicity, lifecycle) are documented in [../ARCHITECTURE.md](../ARCHITECTURE.md).
+
+## Headless Mode
+
+The original approach: each tool call spawns a new CODESYS process with `--noUI`, runs the script, and exits. No UI is shown. Used **only** when:
+
+- `--mode headless` is specified, or
+- Persistent mode fails to launch and `--fallback-headless` is explicitly opted in (off by default)
+
+Persistent mode never silently degrades to headless. With `--no-auto-launch`, the first tool call lazy-launches the visible IDE; after `shutdown_codesys`, the next tool call relaunches it. Headless spawns are avoided because their modal dialogs are invisible (calls just abort), they hold `.project` locks, and they leave orphaned `CODESYS.exe` processes behind.
+
+## Troubleshooting
+
+**CODESYS not found**
+Verify the path with `--detect`. The executable is typically at:
+`C:\Program Files\CODESYS 3.5.XX.X\CODESYS\Common\CODESYS.exe`
+
+**Project file locked**
+Another CODESYS has the project open: CODESYS keeps a lock file `<name>.~u` (user, PC, CODESYS PID) next to the `.project` while it is open. Opening it a second time would pop a modal "currently in use, open read-only?" prompt that blocks the watcher, so the MCP refuses and names the PID or PC that holds it. Use that instance, or close the project there. A lock left by a CODESYS that was killed is removed automatically.
+
+**"No active license has been found" on compile (SP22)**
+SP22 has a licensed build component with one seat per PC. Several CODESYS SP22 instances can run, but only the first holds the seat; a second one compiles with this error, and the tool names the PID that holds it. Compile in that instance (its MCP session), or close it. SP18, SP19 and SP21 have no such limit.
+
+**Watcher timeout (persistent mode)**
+If the watcher doesn't signal ready within the timeout (150s to allow slow-plugin installs), check:
+- CODESYS path and profile are correct
+- No modal dialogs are blocking CODESYS startup
+- Try `--verbose` for detailed logging
+
+**"no script engine implementation available" / contradictory load dialog**
+The install has multiple profiles sharing one name; pass `--codesys-additional-folder` - see [installs-and-profiles.md](installs-and-profiles.md).
+
+**UI briefly pauses during commands (persistent mode)**
+The watcher's timer executes commands on the primary thread; between commands the UI and its menus are fully usable. During synchronous CODESYS API calls (compile, project open), the UI may briefly pause - this is expected and normal. If a command hangs, check the CODESYS messages window for modal dialogs or errors.
+
+**Command timeout**
+Every command waits at least 180s (`--timeout <ms>`); tools with a longer timeout of their own keep it. Headless mode uses the same floor. The first call that has to load a project can be slow (99 s on SP19 with a large add-on folder). Check the CODESYS messages window for errors.
+
+**Online/runtime tools fail**
+The online tools (`connect_to_device`, `read_variable`, etc.) require:
+- A device/gateway configured in the CODESYS project
+- The project to be compiled successfully before connecting
+- A reachable PLC or CODESYS SoftPLC runtime
+
+**"Refusing to switch projects: ... has UNSAVED changes"**
+A tool addressed project B while project A was open with unsaved changes. Since v0.17.0 the server never saves A on its own - call `save_project` (to keep the changes) or `close_project` with `saveFirst=false` (to discard them), then retry.
+
+**`create_redundancy_config` Set Path PLC2 by `plc2Address` fails with "SetActivePath failed for '<address>' via gateway 'Gateway-1': None"**
+Open bug, seen 2026-10-01 with `127.0.0.1:11746` (SSH tunnel to a WAGO 750-8210) and `deviceUser`/`devicePassword` passed; no dialog was reported. The redundancy commands open their own connections (`IOnlineDevice3.SharedConnect` for Write, `IOnlineDevice.Connect` + `GetTargetIdent` for Set Path PLC2). If both PLCs already hold the redundancy settings, the PLC2 path is not needed for bring-up: download to PLC1, create the boot application, restart both, and PLC2 receives the boot application over the redundancy link.
+
+**`create_redundancy_config` Write "succeeded" but `/home/codesys_root/eRUNTIME.cfg` does not exist on the PLC**
+That path comes from WAGO's FW26-era how-to. On PFC200 FW31 (runtime 3.5.21.x) the settings are stored in **`/home/codesys_root/CODESYSControl.cfg`**, in the sections `[CmpRedundancyConnectionIP]` (`Link1.IpAddressLocal` / `Link1.IpAddressPeer` / `Link1.Port`, mirrored per controller) and `[CmpRedundancy]` (`StandbyWaitTime`, `SyncWaitTime`, `AutoSyncEnabled`, `RedundancyTaskName`, `PlcIdent`, ...). Write also assigns `PlcIdent` 1 to PLC1 and 2 to PLC2. The settings take effect after a runtime restart, so read the file to confirm a Write rather than trusting the tool's own report.
+
+**`create_redundancy_config` Set Path PLC2 fails with "Setting the active path of PLC 2 failed"**
+The gateway scan found no device with that `plc2DeviceName`. Check the name against `scan_network_devices`, and remember that an SSH-tunnelled PLC is invisible to UDP discovery: bind it with `plc2Address` (e.g. `127.0.0.1:11746`) instead, which skips the scan.

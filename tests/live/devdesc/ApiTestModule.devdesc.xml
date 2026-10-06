@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DeviceDescription xmlns="http://www.3s-software.com/schemas/DeviceDescription-1.0.xsd" xmlns:ts="http://www.3s-software.com/schemas/TargetSettings-0.1.xsd">
+  <Types namespace="local" />
+  <Strings namespace="local" />
+  <Files namespace="local" />
+  <Device>
+    <DeviceIdentification>
+      <Type>8000</Type>
+      <Id>0000 4D52-A919</Id>
+      <Version>1.0.0.0</Version>
+    </DeviceIdentification>
+    <DeviceInfo>
+      <Name name="local:ModelName">API test module</Name>
+      <Description name="local:DeviceDescription">Throwaway device for the Codesys-MCP live test, safe to delete.</Description>
+      <Vendor name="local:VendorName">Test vendor</Vendor>
+      <OrderNumber>API-TEST</OrderNumber>
+    </DeviceInfo>
+    <Connector moduleType="257" interface="ApiTest.Slot" role="child" explicit="false" connectorId="1" hostpath="-1">
+      <InterfaceName name="local:SlotIf">test slot</InterfaceName>
+      <Slot count="1" allowEmpty="true" />
+    </Connector>
+  </Device>
+</DeviceDescription>

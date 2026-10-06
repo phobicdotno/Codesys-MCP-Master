@@ -1,0 +1,109 @@
+import { describe, it, expect } from 'vitest';
+import * as path from 'path';
+import { ScriptManager } from '../../src/script-manager';
+
+const SCRIPTS_DIR = path.join(__dirname, '..', '..', 'src', 'scripts');
+
+describe('ScriptManager', () => {
+  const mgr = new ScriptManager(SCRIPTS_DIR);
+
+  it('loads an existing template', () => {
+    const content = mgr.loadTemplate('check_status');
+    expect(content).toContain('scriptengine');
+    expect(content).toContain('SCRIPT_SUCCESS');
+  });
+
+  it('throws for non-existent template', () => {
+    expect(() => mgr.loadTemplate('nonexistent_script')).toThrow(/not found/);
+  });
+
+  it('interpolates a single param', () => {
+    const result = mgr.interpolate('hello {FOO}', { FOO: 'bar' });
+    expect(result).toBe('hello bar');
+  });
+
+  it('passes backslashes through unchanged (raw string templates)', () => {
+    const result = mgr.interpolate('path = r"{PATH}"', {
+      PATH: 'C:\\Users\\Test',
+    });
+    expect(result).toBe('path = r"C:\\Users\\Test"');
+  });
+
+  it('passes triple quotes through unchanged (callers handle escaping)', () => {
+    const result = mgr.interpolate('code = """{CODE}"""', {
+      CODE: 'a """ b',
+    });
+    expect(result).toBe('code = """a """ b"""');
+  });
+
+  it('interpolates multiple params', () => {
+    const result = mgr.interpolate('{A} and {B}', { A: 'x', B: 'y' });
+    expect(result).toBe('x and y');
+  });
+
+  it('two loads return identical content (no cache, fresh file read each call)', () => {
+    const first = mgr.loadTemplate('check_status');
+    const second = mgr.loadTemplate('check_status');
+    expect(first).toEqual(second);
+  });
+
+  it('combineScripts concatenates with double newlines', () => {
+    const result = mgr.combineScripts('script1', 'script2', 'script3');
+    expect(result).toBe('script1\n\nscript2\n\nscript3');
+  });
+
+  it('prepareScript loads and interpolates', () => {
+    // create_project has {PROJECT_FILE_PATH} and {DEVICE_NAME} placeholders
+    const result = mgr.prepareScript('create_project', {
+      PROJECT_FILE_PATH: 'C:\\Projects\\test.project',
+      DEVICE_NAME: 'CODESYS Control Win V3 x64',
+    });
+    // Values should appear as-is (no escaping) since templates use r"..." raw strings
+    expect(result).toContain('C:\\Projects\\test.project');
+    expect(result).toContain("DEVICE_NAME = r'CODESYS Control Win V3 x64'");
+  });
+
+  it('prepareScriptWithHelpers prepends helpers', () => {
+    const result = mgr.prepareScriptWithHelpers(
+      'open_project',
+      { PROJECT_FILE_PATH: 'C:\\test.project' },
+      ['ensure_project_open']
+    );
+    // ensure_project_open content should appear before open_project content
+    const ensureIdx = result.indexOf('def ensure_project_open');
+    const openIdx = result.indexOf('Project Opened');
+    expect(ensureIdx).toBeGreaterThan(-1);
+    expect(openIdx).toBeGreaterThan(-1);
+    expect(ensureIdx).toBeLessThan(openIdx);
+  });
+
+  it('Windows path with spaces passes through correctly', () => {
+    const result = mgr.interpolate('path = r"{PATH}"', {
+      PATH: 'C:\\Program Files\\CODESYS',
+    });
+    expect(result).toBe('path = r"C:\\Program Files\\CODESYS"');
+  });
+
+  it('EVERY script template is ASCII-only (IronPython 2.7, no coding declaration)', () => {
+    const fs = require('fs');
+    const dir = path.join(__dirname, '..', '..', 'src', 'scripts');
+    // withFileTypes so a stray directory (e.g. an untracked __pycache__/ left
+    // behind by a local Python run) doesn't blow up readFileSync with EISDIR.
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true }) as { name: string; isFile(): boolean }[]) {
+      if (!ent.isFile() || !ent.name.endsWith('.py')) continue;
+      const f = ent.name;
+      const body = fs.readFileSync(path.join(dir, f), 'latin1');
+      // eslint-disable-next-line no-control-regex
+      expect(/^[\x00-\x7F]*$/.test(body), `${f} must be ASCII-only`).toBe(true);
+    }
+  });
+
+  it('dollar sequences in values are NOT treated as regex replacement patterns', () => {
+    // IEC string literals use $ escapes ($R$N, $$ for a literal $). A plain
+    // string replacement would collapse '$$' to '$' and expand '$&'.
+    const result = mgr.interpolate('value = "{VALUE}"', {
+      VALUE: "'$R$N' and $$ and $& stay verbatim",
+    });
+    expect(result).toBe('value = "\'$R$N\' and $$ and $& stay verbatim"');
+  });
+});

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<DeviceDescription xmlns="http://www.3s-software.com/schemas/DeviceDescription-1.0.xsd" xmlns:ts="http://www.3s-software.com/schemas/TargetSettings-0.1.xsd">
+  <Types namespace="local" />
+  <Strings namespace="local" />
+  <Files namespace="local" />
+  <Device>
+    <DeviceIdentification>
+      <Type>8000</Type>
+      <Id>0000 4D52-A917</Id>
+      <Version>1.0.0.0</Version>
+    </DeviceIdentification>
+    <DeviceInfo>
+      <Name name="local:ModelName">API test device</Name>
+      <Description name="local:DeviceDescription">Throwaway device for the Codesys-MCP live test, safe to delete.</Description>
+      <Vendor name="local:VendorName">Test vendor</Vendor>
+      <OrderNumber>API-TEST</OrderNumber>
+    </DeviceInfo>
+  </Device>
+</DeviceDescription>

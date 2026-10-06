@@ -1,0 +1,225 @@
+import sys, scriptengine as script_engine, os, traceback, json
+
+# set_signature_access_bulk: set configured_access for every variable in
+# a signature to the same value.
+#
+# RTFM: see set_symbol_access. Same lookup pattern; the difference is
+# we walk every variable inside the signature once we've found it.
+
+SIGNATURE_FQN = r"{SIGNATURE_FQN}"
+ACCESS = "{ACCESS}"
+LIBRARY_ID = r"{LIBRARY_ID}"
+
+
+def _resolve_access(access_str):
+    name = (access_str or '').strip()
+    if name == '':
+        raise ValueError("access string is empty")
+    name_lower = name.lower()
+    int_map = {'none': 0, 'readonly': 1, 'writeonly': 2, 'readwrite': 3}
+    enum_cls = None
+    try:
+        from scriptengine import SymbolAccess as enum_cls  # noqa
+    except Exception:
+        pass
+    if enum_cls is not None:
+        for m in dir(enum_cls):
+            if m.startswith('_'):
+                continue
+            if m.lower() == name_lower:
+                try:
+                    return getattr(enum_cls, m)
+                except Exception:
+                    pass
+    if name_lower in int_map:
+        return int_map[name_lower]
+    raise ValueError(
+        "Unknown access value '%s'. Allowed: None, ReadOnly, WriteOnly, ReadWrite" % access_str)
+
+
+# Member NAMES of the SymbolAccess enum differ between SPs ('Read' on SP19
+# where the docs say 'ReadOnly'), and the int VALUES are not the documented
+# 0/1/2/3 either: SP19 rejects 1 with "Cannot convert numeric value 1 to
+# SymbolAccess. The value must be zero" while 3 happens to be accepted.
+# So never hand the setter an int: look the member up BY NAME on the real
+# enum type (taken from a genuine value such as var.maximal_access), and
+# only then fall back to System.Enum.ToObject.
+_ACCESS_MEMBER_NAMES = {
+    'none': ('None', 'NoAccess'),
+    'readonly': ('ReadOnly', 'Read'),
+    'writeonly': ('WriteOnly', 'Write'),
+    'readwrite': ('ReadWrite',),
+}
+
+
+def _coerce_access(int_value, access_str, sample_enum_value):
+    """Turn the int fallback from _resolve_access into a genuine member of
+    the same .NET enum type as sample_enum_value."""
+    enum_cls = type(sample_enum_value)
+    wanted = _ACCESS_MEMBER_NAMES.get((access_str or '').strip().lower(), ())
+    try:
+        members = [m for m in dir(enum_cls) if not m.startswith('_')]
+    except Exception:
+        members = []
+    for name in wanted:
+        for m in members:
+            if m.lower() == name.lower():
+                try:
+                    value = getattr(enum_cls, m)
+                    print("DEBUG: access '%s' resolved by name on %s: %s" % (access_str, getattr(enum_cls, '__name__', enum_cls), m))
+                    return value
+                except Exception:
+                    continue
+    try:
+        import System
+        value = System.Enum.ToObject(enum_cls, int_value)
+        print("DEBUG: access resolved via System.Enum.ToObject(%s, %r): %r" % (getattr(enum_cls, '__name__', enum_cls), int_value, value))
+        return value
+    except Exception as e:
+        print("DEBUG: System.Enum.ToObject failed: %s" % e)
+    return int_value
+
+
+def _find_signature_in(collection, fqn, library_id=None):
+    if collection is None:
+        return None
+    if hasattr(collection, 'find'):
+        try:
+            if library_id:
+                hit = collection.find(fqn, library_id)
+            else:
+                hit = collection.find(fqn)
+            if hit is not None:
+                return hit
+        except Exception as e:
+            print("DEBUG: collection.find raised: %s" % e)
+    try:
+        # Indexing a missing name returns None instead of raising: only a
+        # hit may return here, or the scans below never run.
+        hit = collection[fqn]
+        if hit is not None:
+            return hit
+    except Exception:
+        pass
+    try:
+        for s in collection:
+            try:
+                if s.full_qualified_name == fqn:
+                    return s
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # The application's own POUs and GVLs are listed WITHOUT the application
+    # prefix ('PLC_PRG', not 'Application.PLC_PRG'; seen on SP18 and SP21).
+    # Accept the prefixed form too: strip the first segment and match a
+    # signature that belongs to no library.
+    if not library_id and '.' in fqn:
+        short = fqn.split('.', 1)[1]
+        try:
+            for s in collection:
+                try:
+                    if s.full_qualified_name == short and not s.library_id:
+                        return s
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    return None
+
+
+try:
+    print("DEBUG: set_signature_access_bulk: fqn='%s' access='%s' lib='%s'" % (
+        SIGNATURE_FQN, ACCESS, LIBRARY_ID))
+    primary_project = ensure_project_open(PROJECT_FILE_PATH)
+    if 'apply_application_selection' in globals():
+        apply_application_selection(primary_project)
+    project_basename = os.path.basename(PROJECT_FILE_PATH)
+
+    sc_obj = ensure_symbol_config(primary_project)
+    sc_path = symbol_config_path(primary_project, sc_obj)
+
+    requested_access = _resolve_access(ACCESS)
+    print("DEBUG: requested_access resolved to %r" % requested_access)
+
+    library_id = LIBRARY_ID if LIBRARY_ID else None
+
+    # IMPORTANT: configured_access is mutable ONLY on signature objects
+    # obtained from get_all_signatures(); the objects returned by
+    # get_only_configured_signatures() are a read-only view and assigning
+    # to .configured_access on them raises
+    #   "The access of the variable can only be changed in the list
+    #    of all signatures/data types."
+    # So we always look up via get_all_signatures, never the configured
+    # view, for the mutation target.
+    sig = None
+    try:
+        all_sigs = sc_obj.get_all_signatures(False)
+        sig = _find_signature_in(all_sigs, SIGNATURE_FQN, library_id)
+    except Exception:
+        pass
+    if sig is None:
+        try:
+            all_sigs = sc_obj.get_all_signatures(True)
+            sig = _find_signature_in(all_sigs, SIGNATURE_FQN, library_id)
+        except Exception:
+            pass
+    if sig is None:
+        raise RuntimeError(
+            "Signature '%s' not found (library_id=%s)." % (SIGNATURE_FQN, LIBRARY_ID or '<none>'))
+
+    # If _resolve_access fell back to a plain int (because `from scriptengine
+    # import SymbolAccess` returned a hollow object on this SP), the C#
+    # setter rejects every non-zero int with "Cannot convert numeric value
+    # N to SymbolAccess. The value must be zero." -- only 0 (=None) survives
+    # the implicit conversion. Recover lazily on the first variable: take
+    # the enum class from v.maximal_access (always a genuine SymbolAccess
+    # value) and re-parse the int through it.
+    changed = []
+    skipped = []
+    try:
+        for v in sig.variables:
+            try:
+                v_name = v.name
+            except Exception:
+                v_name = '?'
+            if isinstance(requested_access, int):
+                try:
+                    requested_access = _coerce_access(requested_access, ACCESS, v.maximal_access)
+                except Exception as e:
+                    print("DEBUG: int->enum coercion failed: %s" % e)
+            try:
+                v.configured_access = requested_access
+                changed.append(v_name)
+            except Exception as e:
+                skipped.append({'name': v_name, 'reason': str(e)})
+    except Exception as e:
+        print("DEBUG: variable iteration failed: %s" % e)
+
+    if changed:
+        primary_project.save()
+
+    result = {
+        'project': project_basename,
+        'symbol_config_path': sc_path,
+        'signature_fqn': SIGNATURE_FQN,
+        'requested_access': str(requested_access),
+        'changed': changed,
+        'changed_count': len(changed),
+        'skipped': skipped,
+        'skipped_count': len(skipped),
+    }
+    print("### SYMBOL_ACCESS_BULK_START ###")
+    print(json.dumps(result))
+    print("### SYMBOL_ACCESS_BULK_END ###")
+    print("Bulk set %s/%d variables of '%s' to %s" % (
+        len(changed), len(changed) + len(skipped), SIGNATURE_FQN, requested_access))
+    print("SCRIPT_SUCCESS: set_signature_access_bulk completed.")
+    sys.exit(0)
+except Exception as e:
+    detailed = traceback.format_exc()
+    msg = "Error in set_signature_access_bulk for project '%s': %s\n%s" % (
+        PROJECT_FILE_PATH, e, detailed)
+    print(msg)
+    print("SCRIPT_ERROR: %s" % msg)
+    sys.exit(1)

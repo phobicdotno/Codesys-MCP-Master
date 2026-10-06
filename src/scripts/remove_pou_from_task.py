@@ -1,0 +1,202 @@
+import sys, scriptengine as script_engine, os, traceback
+
+# Removes a program POU from a task's call list in the project's Task
+# Configuration. The ScriptEngine task.pous remove API is under-documented,
+# so several call shapes are attempted and dir() is dumped on total failure.
+
+TASK_NAME = "{TASK_NAME}"
+POU_NAME = "{POU_NAME}"
+
+def _children(obj):
+    try:
+        return list(obj.get_children(False))
+    except Exception:
+        return []
+
+def _name(obj):
+    try:
+        return obj.get_name()
+    except Exception:
+        return ""
+
+def _is_task_config(obj):
+    try:
+        if getattr(obj, 'is_task_configuration', False):
+            return True
+    except Exception:
+        pass
+    return _name(obj) == "Task Configuration"
+
+def find_task_config(project):
+    queue = _children(project)
+    seen = 0
+    while queue and seen < 5000:
+        obj = queue.pop(0)
+        seen += 1
+        if _is_task_config(obj):
+            return obj
+        queue.extend(_children(obj))
+    return None
+
+def find_task(tc, name):
+    for t in _children(tc):
+        if _name(t) == name:
+            return t
+    return None
+
+def find_call_object(task, pou_name):
+    # Each entry in a task's call list is also a child object of the task
+    # (visible under the task in the device tree). Match on the child's name;
+    # a call may be shown qualified ('App.PRG'), so compare the last segment too.
+    for ch in _children(task):
+        n = _name(ch)
+        if n == pou_name or n.split('.')[-1] == pou_name:
+            return ch
+    return None
+
+try:
+    primary_project = ensure_project_open(PROJECT_FILE_PATH)
+    if 'apply_application_selection' in globals():
+        apply_application_selection(primary_project)
+    if not TASK_NAME: raise ValueError("Task name empty.")
+    if not POU_NAME: raise ValueError("POU name empty.")
+
+    # Multi-device projects: use the Task Configuration of the ACTIVE
+    # application (applicationPath / set_active_application); fall back
+    # to the first one in the project.
+    tc = None
+    try:
+        _app = primary_project.active_application
+    except Exception:
+        _app = None
+    if _app is not None:
+        tc = find_task_config(_app)
+    if tc is None:
+        tc = find_task_config(primary_project)
+    if tc is None:
+        raise ValueError("Task Configuration object not found in project.")
+
+    task = find_task(tc, TASK_NAME)
+    if task is None:
+        names = [_name(t) for t in _children(tc)]
+        raise ValueError("Task '%s' not found. Available tasks: %s" % (TASK_NAME, ", ".join(names)))
+
+    if not hasattr(task, 'pous'):
+        api = sorted([a for a in dir(task) if not a.startswith('_')])
+        raise TypeError("Task '%s' exposes no 'pous' collection. Task API: %s" % (TASK_NAME, ", ".join(api)))
+
+    pous = task.pous
+    before = []
+    try:
+        for p in pous:
+            before.append(str(p))
+    except Exception:
+        pass
+
+    if POU_NAME not in before:
+        raise ValueError("POU '%s' is not in task '%s' call list: %s" % (POU_NAME, TASK_NAME, ", ".join(before)))
+
+    removed = False
+    errors = []
+
+    # Task child object FIRST. On SP21 every task.pous mutation below can
+    # return without error AND without effect - remove(int) included (seed project
+    # 2026-09-15: MainTask/PLC_PRG survived in both applications; the fresh
+    # re-walk caught it). ScriptObject.remove() on the call entry, the route
+    # delete_object takes, does persist. The pous variants stay as fallbacks
+    # for SPs whose tasks expose no call children.
+    call_obj = find_call_object(task, POU_NAME)
+    if call_obj is not None and hasattr(call_obj, 'remove'):
+        try:
+            call_obj.remove(); removed = True
+            print("DEBUG: removed task call object '%s' via ScriptObject.remove()" % _name(call_obj))
+        except Exception as e:
+            errors.append("child.remove(): %s" % e)
+    else:
+        errors.append("child.remove(): no call child named '%s' under task (children: %s)" % (
+            POU_NAME, ", ".join([_name(c) for c in _children(task)])))
+
+    # remove(int index): on SP21 both remove(name) and del pous[i] can
+    # return without effect (no exception, entry persists -- observed Sea
+    # Leopard 2026-07-24 after a program rename left a stale call). The int
+    # overload of remove(index_or_name) is the variant that actually mutates.
+    # Verification after save decides; nothing here is trusted.
+    if not removed:
+        try:
+            pous.remove(before.index(POU_NAME)); removed = True
+        except Exception as e:
+            errors.append("remove(int): %s" % e)
+
+    if not removed:
+        try:
+            del pous[before.index(POU_NAME)]; removed = True
+        except Exception as e:
+            errors.append("del[i]: %s" % e)
+
+    if not removed:
+        try:
+            pous.remove(POU_NAME); removed = True
+        except Exception as e:
+            errors.append("remove(name): %s" % e)
+
+    if not removed and hasattr(pous, 'remove_at'):
+        try:
+            pous.remove_at(before.index(POU_NAME)); removed = True
+        except Exception as e:
+            errors.append("remove_at(i): %s" % e)
+
+    if not removed:
+        try:
+            del pous[before.index(POU_NAME)]; removed = True
+        except Exception as e:
+            errors.append("del[i]: %s" % e)
+
+    if not removed:
+        api = sorted([a for a in dir(pous) if not a.startswith('_')])
+        raise TypeError("Could not remove POU '%s' from task '%s'. Tried: %s. pous API: %s" % (
+            POU_NAME, TASK_NAME, "; ".join(errors), ", ".join(api)))
+
+    primary_project.save()
+
+    # Verify against a FRESH task object, not the mutated one. Reading back
+    # `task.pous` on the same ref can show the entry gone while the project
+    # still has it (observed: removal "succeeded", save ran, POU still in the
+    # task after reopen -- seed project 2026-09-01). Re-walking the tree
+    # from the project root gets refs backed by the post-save model.
+    fresh_tc = None
+    try:
+        _fresh_app = primary_project.active_application
+    except Exception:
+        _fresh_app = None
+    if _fresh_app is not None:
+        fresh_tc = find_task_config(_fresh_app)
+    if fresh_tc is None:
+        fresh_tc = find_task_config(primary_project)
+    fresh_task = find_task(fresh_tc, TASK_NAME) if fresh_tc is not None else None
+    if fresh_task is None:
+        raise RuntimeError("Verification failed: task '%s' not found on re-walk after save." % TASK_NAME)
+
+    after = []
+    verify_err = None
+    try:
+        for p in fresh_task.pous:
+            after.append(str(p))
+    except Exception as e:
+        verify_err = e
+
+    if verify_err is not None:
+        raise RuntimeError("Verification failed: could not re-read task '%s' call list after save: %s" % (
+            TASK_NAME, verify_err))
+
+    if POU_NAME in after:
+        raise RuntimeError("Removal reported success but '%s' is STILL in task '%s' call list: %s" % (
+            POU_NAME, TASK_NAME, ", ".join(after)))
+
+    print("POU '%s' removed from task '%s'." % (POU_NAME, TASK_NAME))
+    print("Task '%s' now calls: %s" % (TASK_NAME, ", ".join(after) if after else "(none)"))
+    print("SCRIPT_SUCCESS: POU call removed from task.")
+    sys.exit(0)
+except Exception as e:
+    detailed_error = traceback.format_exc()
+    error_message = "Error removing POU '%s' from task '%s': %s\n%s" % (POU_NAME, TASK_NAME, e, detailed_error)
+    print(error_message); print("SCRIPT_ERROR: %s" % error_message); sys.exit(1)

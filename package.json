@@ -1,0 +1,57 @@
+{
+  "name": "codesys-mcp-master",
+  "version": "0.19.0",
+  "description": "Codesys-MCP-Master: one MCP server for every installed CODESYS 3.5 version (SP18, SP19, SP21, SP22) with a persistent UI instance, 126 tools and the CODESYS SP22 MCP server's tools alongside. Fork of luke-harriman/Codesys-MCP.",
+  "main": "dist/server.js",
+  "bin": {
+    "codesys-mcp-master": "dist/bin.js",
+    "codesys-mcp-sp21-plus": "dist/bin.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && node -e \"const fs=require('fs');fs.rmSync('dist/scripts',{recursive:true,force:true});fs.cpSync('src/scripts','dist/scripts',{recursive:true})\"",
+    "prepare": "node scripts/prepare.mjs",
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "test:no-vitest": "node tests/run-without-vitest.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "codesys",
+    "mcp",
+    "plc",
+    "automation",
+    "persistent",
+    "ui"
+  ],
+  "author": "luke-harriman (upstream); phobicdotno (SP21+ fork)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phobicdotno/Codesys-MCP-Master.git"
+  },
+  "homepage": "https://github.com/phobicdotno/Codesys-MCP-Master#readme",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "commander": "^11.1.0",
+    "ssh2": "^1.17.0",
+    "uuid": "^9.0.0",
+    "zod": "^3.24.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.1",
+    "@types/ssh2": "^1.15.5",
+    "@types/uuid": "^9.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.5.3",
+    "vitest": "^1.6.0"
+  }
+}

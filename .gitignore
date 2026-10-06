@@ -1,0 +1,28 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+*.log
+.DS_Store
+
+# Test artifacts
+test_output/
+projects/
+project_examples/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# CODESYS project binaries
+*.project
+*.precompilecache
+*.opt
+
+# Local config
+.mcp.json
+.claude/
+CLAUDE.md
+
+# Git worktrees (isolated feature workspaces)
+.worktrees/
