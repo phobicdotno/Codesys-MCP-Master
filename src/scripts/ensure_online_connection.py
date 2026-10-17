@@ -289,9 +289,12 @@ def ensure_logged_in(online_app, login_wait_seconds=30):
         except TypeError as e:
             last_err = e
         except Exception as e:
+            # The shape was accepted and the login failed: stop. Trying the
+            # remaining shapes (Force/Keep/Never) logs in again and can run a
+            # full download per attempt while the IDE stays busy.
             last_err = e
-            if login_err is None:
-                login_err = e
+            login_err = e
+            break
 
     if not logged_in:
         raise RuntimeError("Login to the PLC failed: %s" % (login_err or last_err))
