@@ -109,8 +109,10 @@ try:
             # was accepted and the login itself failed (no gateway, refused,
             # K-bus mismatch, a prompt answered by the script engine). Stop
             # there: every further accepted shape logs in again and can run a
-            # full download each time, which kept the IDE busy for minutes and
-            # downloaded the same application 18 times in a row.
+            # full download each time and keeps the IDE busy for minutes.
+            # (A single full download over a slow tunnel already takes about
+            # two minutes and the PLC logs one "Download successful" line per
+            # chunk, every few seconds: that is not a loop.)
             if not isinstance(e, TypeError):
                 break
 

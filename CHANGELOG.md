@@ -6,6 +6,11 @@ Until v0.19.0 the project was called Codesys-MCP-SP21+ (npm package `codesys-mcp
 
 ## Unreleased
 
+- **A slow full download is not a loop; the download timeout now allows for it.** Over an SSH tunnel on a slow VPN a full download of a 5 MB application took about 2 minutes, and the PLC's runtime.log shows one "Download successful, create bootproject: 0" line per chunk, every 3 to 4 seconds. With 2 minutes of headroom `download_to_device` timed out while CODESYS was still downloading, and the steady log lines were taken for a download loop and the download killed (twice, 2026-10-17). Now:
+  - `download_to_device` waits up to 10 minutes plus the login wait.
+  - A timed-out (or abandoned) login command comes back as a normal failed reply instead of a bare exception, starting with what it means: CODESYS may still be working, one log line per chunk is a download in progress, do not kill CODESYS, wait until the log stops growing.
+  - The comments in `connect_to_device.py` and `download_to_device.py` no longer claim the same application was downloaded 18 times: that count was chunks of one download. Stopping at the first real login failure stays, since each further accepted call shape can still start a full download.
+
 - **Login diagnostics for a PLC behind a tunnel** (`src/online-diagnose.ts`). After a PLC dropped mid-session, scripted logins failed with three CODESYS messages that all pointed the wrong way, and each retry left the IDE more stuck. Now:
   - `rebind_device_to_scan_result` with an IP-form `matchAddress` records the binding (`%LOCALAPPDATA%\Codesys-MCP-Master\ip-bindings.json`), because CODESYS cannot report an IP binding back (`get_address()` stays empty). A binding by scan removes the record.
   - `connect_to_device` and `download_to_device` probe that address with a plain TCP connection before logging in, also with `skipReachabilityCheck`. Refused or timed out (tunnel or runtime down) stops the call with that cause. A connection the runtime closes at once does not block: a CODESYS runtime serves one gateway connection at a time and drops a second one, measured on a healthy PFC200 with an IDE logged in. If the login then fails, the reply explains it and how to find a dead connection that holds the slot.

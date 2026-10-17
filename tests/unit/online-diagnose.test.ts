@@ -92,6 +92,9 @@ describe('loginFailureHint', () => {
   it('points at rebinding for No active path', () => {
     expect(loginFailureHint('No active path defined')).toMatch(/rebind_device_to_scan_result/);
   });
+  it('says a timed-out download may still be running', () => {
+    expect(loginFailureHint('Command 822c3af6 timed out after 180000ms waiting for result')).toMatch(/not a loop.*Do not kill CODESYS/s);
+  });
   it('stays quiet for unknown output', () => {
     expect(loginFailureHint('Invalid user authentication on the target')).toBeNull();
   });

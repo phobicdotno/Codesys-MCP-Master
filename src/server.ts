@@ -1567,7 +1567,15 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   const runOnline = (script: string, timeoutMs: number): Promise<{ result: IpcResult; recovery: string | null }> => {
     const pidNow = () => cur().launcher?.getStatus().pid ?? null;
     return runWithRecovery({
-      run: () => executor.executeScript(script, timeoutMs),
+      // A timeout (or a vanished CODESYS) becomes a failed result, so the reply
+      // carries the hint instead of a bare exception.
+      run: () => executor.executeScript(script, timeoutMs).catch((e: unknown): IpcResult => ({
+        requestId: '' as IpcResult['requestId'],
+        success: false,
+        output: '',
+        error: e instanceof Error ? e.message : String(e),
+        timestamp: Date.now(),
+      })),
       attached: () => (cur().launcher ? cur().launcher!.attached : null),
       shutdown: () => cur().launcher!.shutdown({ unsaved: 'ask' }),
       gatewayLinked: () => hasGatewayLink(pidNow()),
@@ -5854,8 +5862,12 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         },
         ['register_device_credentials', 'ensure_project_open', 'select_application', 'ensure_online_connection']
       );
-      // Tool-side timeout = wait window + 120s headroom for the actual download
-      const ipcTimeoutMs = (waitSec + 120) * 1000;
+      // Tool-side timeout = wait window + 10 min for the download itself. A full
+      // download of a 5 MB application through an SSH tunnel over a slow VPN
+      // took about 2 minutes (2026-10-17); with 2 minutes of headroom the call
+      // timed out while CODESYS was still downloading, and the download was
+      // then killed as a supposed loop.
+      const ipcTimeoutMs = (waitSec + 600) * 1000;
       return onlineReply(await runOnline(script, ipcTimeoutMs), prep, `Application downloaded to device for ${args.projectFilePath}.`);
     }
   );

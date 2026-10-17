@@ -126,6 +126,11 @@ export function loginFailureHint(output: string): string | null {
     return '"Stack empty" from the online layer: a modal dialog is probably open in CODESYS (for example a network scan ' +
       'result); close it and retry. With a watcher older than 0.6.0 it is the timer-watcher bug instead: restart that CODESYS.';
   }
+  if (/timed out after \d+\s*ms waiting for result/i.test(text)) {
+    return 'The command timed out on the MCP side, but CODESYS may still be working on it. A full download over a slow ' +
+      'link takes minutes, and the PLC logs one "Download successful" line per chunk every few seconds: that is a download ' +
+      'in progress, not a loop. Do not kill CODESYS. Wait until the PLC log stops growing, then check the application state.';
+  }
   if (/No active path/i.test(text)) {
     return 'The device has no active path: bind it with rebind_device_to_scan_result (matchAddress "host:port" for a tunnel).';
   }
