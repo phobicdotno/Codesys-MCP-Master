@@ -265,3 +265,61 @@ export async function gatewayLinkNote(pid: number | null, list: TcpLister = defa
     : `CODESYS (PID ${pid}) has no connection to its gateway (port ${gatewayPort}). In the device's Communication Settings ` +
       `select the device address and press Enter (that reconnected it on 2026-10-17), or restart that CODESYS; then retry.`;
 }
+
+export interface ScriptRun {
+  success: boolean;
+  output: string;
+  error?: string;
+}
+
+export interface RecoveryDeps<R extends ScriptRun> {
+  run: () => Promise<R>;
+  /** null when this server did not start a CODESYS for the call; true when the user opened it. */
+  attached: () => boolean | null;
+  /** Closes that CODESYS; throws (DecisionNeededError) when projects are unsaved. */
+  shutdown: () => Promise<void>;
+  /** Does that CODESYS have its own gateway connection? null when unknown. */
+  gatewayLinked: () => Promise<boolean | null>;
+}
+
+const RECOVERY_WHY = {
+  stale: 'CODESYS held a stale online session from earlier failed logins ("An item with the same key has already been added")',
+  gateway: 'CODESYS had lost its own connection to the gateway ("Gateway not configured properly", no connection to port 1217)',
+};
+
+/**
+ * Runs a login script and recovers once from the two stuck states only a
+ * fresh CODESYS clears: a stale online session, and an IDE that lost its
+ * gateway connection. Only a CODESYS this server started is closed, never
+ * one the user opened; unsaved projects stop it with the usual question.
+ */
+export async function runWithRecovery<R extends ScriptRun>(deps: RecoveryDeps<R>): Promise<{ result: R; recovery: string | null }> {
+  const result = await deps.run();
+  if (result.success && result.output.includes('SCRIPT_SUCCESS')) return { result, recovery: null };
+  let why: string | null = null;
+  if (isStaleOnlineSession(result.output)) why = RECOVERY_WHY.stale;
+  else if (isGatewayNotConfigured(result.output) && (await deps.gatewayLinked()) === false) why = RECOVERY_WHY.gateway;
+  if (!why) return { result, recovery: null };
+  const attached = deps.attached();
+  if (attached === null) return { result, recovery: null };
+  if (attached) return { result, recovery: `${why}. That CODESYS was opened by the user, so it was not closed: ASK THE USER to restart it.` };
+  try {
+    await deps.shutdown();
+  } catch (err) {
+    return { result, recovery: `${why}, and it was not restarted: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const done = `${why}. This server had started that CODESYS and it had no unsaved changes, so it was closed`;
+  try {
+    return { result: await deps.run(), recovery: `${done} and the call ran once more in a fresh one.` };
+  } catch (err) {
+    return { result, recovery: `${done}, but starting a fresh one failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/** The gateway check as a yes/no: established connection from that process to the gateway port. */
+export async function hasGatewayLink(pid: number | null, list: TcpLister = defaultTcpLister, gatewayPort = 1217): Promise<boolean | null> {
+  if (pid === null) return null;
+  const conns = await list(pid);
+  if (conns === null) return null;
+  return conns.some((c) => c.remotePort === gatewayPort && /established/i.test(c.state));
+}

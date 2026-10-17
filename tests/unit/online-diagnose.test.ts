@@ -150,3 +150,73 @@ describe('stale session and gateway link', () => {
     expect(await gatewayLinkNote(null)).toBeNull();
   });
 });
+
+describe('runWithRecovery', () => {
+  const ok = { success: true, output: 'SCRIPT_SUCCESS: done' };
+  const stale = { success: false, output: 'Login failed: An item with the same key has already been added.' };
+  const gw = { success: false, output: 'Gateway not configured properlyDo you want to continue with the items?' };
+
+  async function setup(results: Array<typeof ok>, o: { attached?: boolean | null; linked?: boolean | null; shutdownThrows?: string; secondRunThrows?: string } = {}) {
+    const { runWithRecovery } = await import('../../src/online-diagnose');
+    const calls = { run: 0, shutdown: 0 };
+    const r = await runWithRecovery({
+      run: async () => {
+        calls.run++;
+        if (calls.run === 2 && o.secondRunThrows) throw new Error(o.secondRunThrows);
+        return results[Math.min(calls.run, results.length) - 1];
+      },
+      attached: () => (o.attached === undefined ? false : o.attached),
+      shutdown: async () => { calls.shutdown++; if (o.shutdownThrows) throw new Error(o.shutdownThrows); },
+      gatewayLinked: async () => (o.linked === undefined ? true : o.linked),
+    });
+    return { r, calls };
+  }
+
+  it('leaves a success alone', async () => {
+    const { r, calls } = await setup([ok]);
+    expect(r.recovery).toBeNull();
+    expect(calls).toEqual({ run: 1, shutdown: 0 });
+  });
+
+  it('restarts its own CODESYS once on a stale session and returns the retry', async () => {
+    const { r, calls } = await setup([stale, ok]);
+    expect(calls).toEqual({ run: 2, shutdown: 1 });
+    expect(r.result).toBe(ok);
+    expect(r.recovery).toMatch(/ran once more in a fresh one/);
+  });
+
+  it('retries exactly once even if the retry fails the same way', async () => {
+    const { calls } = await setup([stale, stale]);
+    expect(calls).toEqual({ run: 2, shutdown: 1 });
+  });
+
+  it('never closes a CODESYS the user opened', async () => {
+    const { r, calls } = await setup([stale], { attached: true });
+    expect(calls.shutdown).toBe(0);
+    expect(r.recovery).toMatch(/opened by the user.*ASK THE USER/);
+  });
+
+  it('does nothing without a CODESYS of its own', async () => {
+    const { r, calls } = await setup([stale], { attached: null });
+    expect(calls.shutdown).toBe(0);
+    expect(r.recovery).toBeNull();
+  });
+
+  it('stops on unsaved projects and keeps the question', async () => {
+    const { r, calls } = await setup([stale], { shutdownThrows: 'unsaved changes: ASK THE USER' });
+    expect(calls.run).toBe(1);
+    expect(r.recovery).toMatch(/not restarted: unsaved changes: ASK THE USER/);
+  });
+
+  it('restarts on a gateway failure only when the IDE lost its gateway link', async () => {
+    expect((await setup([gw, ok], { linked: false })).calls).toEqual({ run: 2, shutdown: 1 });
+    expect((await setup([gw], { linked: true })).calls).toEqual({ run: 1, shutdown: 0 });
+    expect((await setup([gw], { linked: null })).calls).toEqual({ run: 1, shutdown: 0 });
+  });
+
+  it('keeps the note when the fresh CODESYS fails to start', async () => {
+    const { r } = await setup([stale], { secondRunThrows: 'launch refused' });
+    expect(r.result).toBe(stale);
+    expect(r.recovery).toMatch(/was closed, but starting a fresh one failed: launch refused/);
+  });
+});

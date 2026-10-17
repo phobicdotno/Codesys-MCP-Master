@@ -42,7 +42,7 @@ import { uncPathError } from './path-guard';
 import { readSelection } from './state-read';
 import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
-import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isStaleOnlineSession, isGatewayNotConfigured, gatewayLinkNote, PreLoginCheck } from './online-diagnose';
+import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isGatewayNotConfigured, gatewayLinkNote, runWithRecovery, hasGatewayLink, PreLoginCheck } from './online-diagnose';
 import { clearIdeDialogs } from './ide-dialogs';
 
 /**
@@ -1563,34 +1563,23 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     return { block: probe.block, probe, answered: dialogs.answered };
   };
 
-  /**
-   * Runs a login script. On "An item with the same key has already been
-   * added" (CODESYS keeps half an online session after failed logins; retrying
-   * in the same CODESYS never helps) a CODESYS this server started is closed
-   * and the script runs once more in a fresh one. Unsaved projects stop that
-   * with the usual question; a CODESYS the user opened is never closed.
-   */
-  const runOnline = async (script: string, timeoutMs: number): Promise<{ result: IpcResult; recovery: string | null }> => {
-    const result = await executor.executeScript(script, timeoutMs);
-    if ((result.success && result.output.includes('SCRIPT_SUCCESS')) || !isStaleOnlineSession(result.output)) {
-      return { result, recovery: null };
-    }
-    const launcher = cur().launcher;
-    if (!launcher || launcher.attached) return { result, recovery: null };
-    try {
-      await launcher.shutdown({ unsaved: 'ask' });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { result, recovery: `CODESYS holds a stale online session and was not restarted: ${msg}` };
-    }
-    const retry = await executor.executeScript(script, timeoutMs);
-    return {
-      result: retry,
-      recovery: 'CODESYS held a stale online session from earlier failed logins ("An item with the same key has already ' +
-        'been added"). This server had started that CODESYS and it had no unsaved changes, so it was closed and the call ' +
-        'ran once more in a fresh one.',
-    };
+  /** Runs a login script, recovering once from a stale session or a lost gateway link (runWithRecovery). */
+  const runOnline = (script: string, timeoutMs: number): Promise<{ result: IpcResult; recovery: string | null }> => {
+    const pidNow = () => cur().launcher?.getStatus().pid ?? null;
+    return runWithRecovery({
+      run: () => executor.executeScript(script, timeoutMs),
+      attached: () => (cur().launcher ? cur().launcher!.attached : null),
+      shutdown: () => cur().launcher!.shutdown({ unsaved: 'ask' }),
+      gatewayLinked: () => hasGatewayLink(pidNow()),
+    });
   };
+
+  /** Puts what was done automatically in front of a reply. */
+  const withAnswered = (
+    reply: { content: Array<{ type: 'text'; text: string }>; isError: boolean },
+    answered: string[],
+  ): { content: Array<{ type: 'text'; text: string }>; isError: boolean } =>
+    answered.length === 0 ? reply : { ...reply, content: reply.content.map((c) => ({ ...c, text: `${answered.join('\n')}\n\n${c.text}` })) };
 
   /** A login tool's reply: what was done automatically, then the result (with the runtime note on failure). */
   const onlineReply = async (
@@ -1599,7 +1588,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
     successMessage: string,
   ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError: boolean }> => {
     const reply = withProbeNote(formatToolResponse(r.result, successMessage), prep.probe);
-    const gateway = reply.isError && isGatewayNotConfigured(r.result.output)
+    const gateway = reply.isError && !r.recovery && isGatewayNotConfigured(r.result.output)
       ? await gatewayLinkNote(cur().launcher?.getStatus().pid ?? null)
       : null;
     const before = [...prep.answered, ...(r.recovery ? [r.recovery] : []), ...(gateway ? [gateway] : [])];
@@ -5820,7 +5809,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         const verifyResult = await executor.executeScript(verifyScript, 60_000);
         const verifySuccess = verifyResult.success && verifyResult.output.includes('SCRIPT_SUCCESS');
         if (!verifySuccess) {
-          return formatToolResponse(verifyResult, `Pre-flight verify_device_reachable failed for ${args.projectFilePath}. Pass skipReachabilityCheck=true to bypass.`);
+          return withAnswered(formatToolResponse(verifyResult, `Pre-flight verify_device_reachable failed for ${args.projectFilePath}. Pass skipReachabilityCheck=true to bypass.`), prep.answered);
         }
         const startMarker = '### DEVICE_REACHABILITY_START ###';
         const endMarker = '### DEVICE_REACHABILITY_END ###';
@@ -5833,7 +5822,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
               const candidateList = (json.candidates ?? [])
                 .map((c: { device_name?: string; address?: string }) => `  - ${c.device_name ?? '?'} @ ${c.address ?? '?'}`)
                 .join('\n');
-              return {
+              return withAnswered({
                 content: [{
                   type: 'text' as const,
                   text: `Pre-flight FAILED: device at cached address '${json.cached_address}' is not reachable. ` +
@@ -5842,12 +5831,17 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
                     `Or pass skipReachabilityCheck=true to force the download anyway.`,
                 }],
                 isError: true,
-              };
+              }, prep.answered);
             }
           } catch {
             // JSON parse failed -- don't block download on a parse error.
           }
         }
+        // A network scan can leave a result box open in the IDE, which would
+        // block the download script: clear the harmless ones again.
+        const again = await clearIdeDialogs(cur().launcher?.getStatus().pid ?? null);
+        prep.answered.push(...again.answered);
+        if (again.block) return { content: [{ type: 'text' as const, text: [...prep.answered, again.block].join('\n') }], isError: true };
       }
 
       const script = scriptManager.prepareScriptWithHelpers(
