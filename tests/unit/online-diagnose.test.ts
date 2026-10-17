@@ -1,0 +1,129 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as net from 'net';
+import * as os from 'os';
+import * as path from 'path';
+import {
+  parseIpAddress, probeRuntime, probeVerdict, loginFailureHint,
+  rememberIpBinding, ipBindingFor, preLoginProbe, withNote,
+} from '../../src/online-diagnose';
+
+const servers: net.Server[] = [];
+afterEach(() => {
+  for (const s of servers.splice(0)) s.close();
+});
+
+/** A local server that either keeps connections open or closes them at once. */
+function server(mode: 'hold' | 'drop'): Promise<number> {
+  return new Promise((resolve) => {
+    const s = net.createServer((c) => {
+      if (mode === 'drop') c.destroy();
+      else c.on('error', () => undefined);
+    });
+    servers.push(s);
+    s.listen(0, '127.0.0.1', () => resolve((s.address() as net.AddressInfo).port));
+  });
+}
+
+/** A port nothing listens on: bind, read the port, close. */
+function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const s = net.createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const p = (s.address() as net.AddressInfo).port;
+      s.close(() => resolve(p));
+    });
+  });
+}
+
+function tmpFile(): string {
+  return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ipbind-')), 'ip-bindings.json');
+}
+
+describe('parseIpAddress', () => {
+  it('reads host:port and defaults the port to 11740', () => {
+    expect(parseIpAddress('127.0.0.1:11740')).toEqual({ host: '127.0.0.1', port: 11740 });
+    expect(parseIpAddress('192.0.2.10')).toEqual({ host: '192.0.2.10', port: 11740 });
+  });
+  it('rejects router addresses and junk', () => {
+    expect(parseIpAddress('0301.3053')).toBeNull();
+    expect(parseIpAddress('')).toBeNull();
+    expect(parseIpAddress('127.0.0.1:99999')).toBeNull();
+  });
+});
+
+describe('probeRuntime', () => {
+  it('reports open for a runtime that keeps the connection', async () => {
+    const port = await server('hold');
+    const r = await probeRuntime('127.0.0.1', port, 300);
+    expect(r.state).toBe('open');
+    expect(probeVerdict(r)).toBeNull();
+  });
+
+  it('reports closed for a runtime that accepts and drops at once', async () => {
+    const port = await server('drop');
+    const r = await probeRuntime('127.0.0.1', port, 1000);
+    expect(r.state).toBe('closed');
+    expect(r.closedAfterMs).toBeLessThan(1000);
+    // A busy runtime drops a second connection too: never a reason to block.
+    expect(probeVerdict(r)).toBeNull();
+  });
+
+  it('reports refused when nothing listens', async () => {
+    const port = await freePort();
+    const r = await probeRuntime('127.0.0.1', port, 300);
+    expect(r.state).toBe('refused');
+    expect(probeVerdict(r)).toMatch(/Nothing listens/);
+  });
+});
+
+describe('loginFailureHint', () => {
+  it('names the stuck online session', () => {
+    expect(loginFailureHint('Login failed: Exception was raised: An item with the same key has already been added.'))
+      .toMatch(/fresh one/);
+  });
+  it('explains the gateway message', () => {
+    expect(loginFailureHint("Gateway not configured properlyDo you want to continue with the items?"))
+      .toMatch(/rebind_device_to_scan_result/);
+  });
+  it('points at a modal dialog for Stack empty', () => {
+    expect(loginFailureHint('create_online_application() failed: Stack empty.')).toMatch(/modal dialog/);
+  });
+  it('stays quiet for unknown output', () => {
+    expect(loginFailureHint('Invalid user authentication on the target')).toBeNull();
+  });
+});
+
+describe('IP bindings and the pre-login probe', () => {
+  it('remembers an IP binding per project, case and slash insensitive, and drops it on a scan binding', () => {
+    const f = tmpFile();
+    rememberIpBinding('C:/plc/A/A.project', '127.0.0.1:11740', f);
+    expect(ipBindingFor('c:\\plc\\a\\a.project', f)).toBe('127.0.0.1:11740');
+    rememberIpBinding('C:/plc/A/A.project', '', f);
+    expect(ipBindingFor('C:/plc/A/A.project', f)).toBeNull();
+  });
+
+  it('does not block without a known binding', async () => {
+    expect(await preLoginProbe('C:/plc/none.project', tmpFile())).toEqual({ block: null, note: null });
+  });
+
+  it('blocks only when nothing listens; a dropped probe becomes a note', async () => {
+    const f = tmpFile();
+    const gone = await freePort();
+    rememberIpBinding('C:/plc/B.project', `127.0.0.1:${gone}`, f);
+    const refused = await preLoginProbe('C:/plc/B.project', f);
+    expect(refused.block).toMatch(/^Pre-login check FAILED/);
+
+    const drop = await server('drop');
+    rememberIpBinding('C:/plc/B.project', `127.0.0.1:${drop}`, f);
+    const busy = await preLoginProbe('C:/plc/B.project', f);
+    expect(busy.block).toBeNull();
+    expect(busy.note).toMatch(/one gateway connection at a time/);
+    expect(withNote('Operation failed.', busy)).toMatch(/^Runtime check:.*\n\nOperation failed\.$/s);
+    expect(withNote('Operation failed.', { block: null, note: null })).toBe('Operation failed.');
+
+    const hold = await server('hold');
+    rememberIpBinding('C:/plc/B.project', `127.0.0.1:${hold}`, f);
+    expect(await preLoginProbe('C:/plc/B.project', f)).toEqual({ block: null, note: null });
+  });
+});

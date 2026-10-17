@@ -42,6 +42,7 @@ import { uncPathError } from './path-guard';
 import { readSelection } from './state-read';
 import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
+import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote } from './online-diagnose';
 
 /**
  * Executor used in persistent mode whenever the launcher isn't running yet:
@@ -1235,11 +1236,26 @@ function formatToolResponse(
         type: 'text' as const,
         text: success
           ? successMessage
-          : `Operation failed. Output:\n${result.output}${result.error ? '\nError: ' + result.error : ''}`,
+          : withLoginHint(`Operation failed. Output:\n${result.output}${result.error ? '\nError: ' + result.error : ''}`),
       },
     ],
     isError: !success,
   };
+}
+
+/** Adds the pre-login runtime note to a failed online call. */
+function withProbeNote(
+  r: { content: Array<{ type: 'text'; text: string }>; isError: boolean },
+  probe: { block: string | null; note: string | null },
+): { content: Array<{ type: 'text'; text: string }>; isError: boolean } {
+  if (!r.isError) return r;
+  return { ...r, content: r.content.map((c) => ({ ...c, text: withNote(c.text, probe) })) };
+}
+
+/** Puts the meaning of a known CODESYS login failure in front of the raw output. */
+function withLoginHint(text: string): string {
+  const hint = loginFailureHint(text);
+  return hint ? `${hint}\n\n${text}` : text;
 }
 
 /**
@@ -3230,6 +3246,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       rememberDeviceCredentials(args.deviceUser, args.devicePassword, escaped);
       const deviceUser = args.deviceUser || rememberedDeviceUser(escaped);
       const devicePassword = args.devicePassword || rememberedDevicePassword(escaped);
+      const probe = await preLoginProbe(escaped);
+      if (probe.block) return { content: [{ type: 'text' as const, text: probe.block }], isError: true };
       const script = scriptManager.prepareScriptWithHelpers(
         'connect_to_device',
         {
@@ -3243,7 +3261,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       // Tool-side timeout = wait window + 30s headroom for actual login work
       const ipcTimeoutMs = (waitSec + 30) * 1000;
       const result = await executor.executeScript(script, ipcTimeoutMs);
-      return formatToolResponse(result, `Connected to device for ${args.projectFilePath}.`);
+      return withProbeNote(formatToolResponse(result, `Connected to device for ${args.projectFilePath}.`), probe);
     }
   );
 
@@ -5614,6 +5632,11 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         return formatToolResponse(result, '');
       }
       const json = extractMarkerJson(result.output, '### REBIND_RESULT_START ###', '### REBIND_RESULT_END ###');
+      // Keep the IP binding for the pre-login probe: CODESYS cannot report it
+      // back. A binding by scan replaces it, so the record is dropped then.
+      if (/"rebound":\s*true/.test(json)) {
+        rememberIpBinding(escaped, args.matchAddress && parseIpAddress(args.matchAddress) ? args.matchAddress : '');
+      }
       return { content: [{ type: 'text' as const, text: `Rebind for ${args.projectFilePath}:\n${json}` }], isError: false };
     }
   );
@@ -5700,7 +5723,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'download_to_device',
-    'Downloads the compiled application to the PLC device. Attempts online change first, falls back to full download. PRE-FLIGHT: this tool automatically runs verify_device_reachable BEFORE attempting login(), and refuses to proceed if the cached device address is not in the live scan results; rebind it (call rebind_device_to_scan_result) or set skipReachabilityCheck=true to force. ALWAYS pass deviceUser+devicePassword (or set CODESYS_DEVICE_USER/CODESYS_DEVICE_PASSWORD env vars on the MCP): same credential injection as connect_to_device, the Device User Login dialog does not appear and the download runs unattended. Do not warn the user about a login dialog or ask them to fill one in.',
+    'Downloads the compiled application to the PLC device. Attempts online change first, falls back to full download. PRE-FLIGHT: a device bound by IP (rebind_device_to_scan_result with matchAddress, e.g. an SSH tunnel) first gets a TCP probe of its runtime, also with skipReachabilityCheck: nothing listening (tunnel or runtime down) stops the call with the cause instead of a misleading "Gateway not configured properly"; a runtime that drops the probe (normal while a gateway already holds its connection) is reported only if the login then fails. Then this tool runs verify_device_reachable BEFORE attempting login(), and refuses to proceed if the cached device address is not in the live scan results; rebind it (call rebind_device_to_scan_result) or set skipReachabilityCheck=true to force. ALWAYS pass deviceUser+devicePassword (or set CODESYS_DEVICE_USER/CODESYS_DEVICE_PASSWORD env vars on the MCP): same credential injection as connect_to_device, the Device User Login dialog does not appear and the download runs unattended. Do not warn the user about a login dialog or ask them to fill one in.',
     {
       projectFilePath: z.string().describe("Path to the project file."),
       applicationPath: z.string().optional().describe(APP_PATH_DESC),
@@ -5721,6 +5744,13 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       rememberDeviceCredentials(args.deviceUser, args.devicePassword, escaped);
       const deviceUser = args.deviceUser || rememberedDeviceUser(escaped);
       const devicePassword = args.devicePassword || rememberedDevicePassword(escaped);
+
+      // A device bound by IP (a tunnel) gets a TCP probe of its runtime, also
+      // with skipReachabilityCheck: a runtime that drops connections makes
+      // every login fail with a misleading gateway error, and each failed
+      // login leaves CODESYS a bit more stuck.
+      const probe = await preLoginProbe(escaped);
+      if (probe.block) return { content: [{ type: 'text' as const, text: probe.block }], isError: true };
 
       // Pre-flight: scan the gateway and confirm the cached device address
       // matches a live target. Stale binding is the #1 cause of "download
@@ -5778,7 +5808,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       // Tool-side timeout = wait window + 120s headroom for the actual download
       const ipcTimeoutMs = (waitSec + 120) * 1000;
       const result = await executor.executeScript(script, ipcTimeoutMs);
-      return formatToolResponse(result, `Application downloaded to device for ${args.projectFilePath}.`);
+      return withProbeNote(formatToolResponse(result, `Application downloaded to device for ${args.projectFilePath}.`), probe);
     }
   );
 
