@@ -15,6 +15,7 @@ import { ServerConfig, IpcResult, ScriptExecutor, ExecutionMode } from './types'
 import { AsyncLocalStorage } from 'async_hooks';
 import { CodesysLauncher, SESSION_DIR_PREFIX, OtherInstancesChoice, buildLaunchQuestion } from './launcher';
 import { writeAttachScript } from './attach';
+import { AttachCandidate, autoAttach, describeAutomation, formatCandidates, runAttachAutomation } from './attach-uia';
 import { HeadlessExecutor } from './headless';
 import { ScriptManager, rememberDeviceCredentials, rememberedDeviceUser, rememberedDevicePassword } from './script-manager';
 import { serverLog, setLogLevel } from './logger';
@@ -1826,12 +1827,14 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'attach_codesys',
-    "Take over a CODESYS the user opened by hand (the MCP did not start it, so it has no watcher), e.g. to work in the project the user has open. Writes the attach script and waits for the user to run it once in that CODESYS: Tools > Scripting > Execute Script File..., pick the script (path in the reply). The script installs the MCP watcher and returns; CODESYS stays fully usable. Then every tool for that install runs in that CODESYS. The MCP never closes or kills an attached CODESYS: shutdown_codesys (and the server stopping with --no-keep-alive) only detaches; with the default keep-alive the next session takes it over. Opening another project never closes one with unsaved changes (close_project saveFirst=false still does, as asked). Tell the user the menu path and the script path BEFORE calling with a long waitSeconds, or call with waitSeconds 0 first to get the path.",
+    "Take over a CODESYS the user opened by hand (the MCP did not start it, so it has no watcher), e.g. to work in the project the user has open. The attach script installs the MCP watcher and returns; CODESYS stays fully usable. By default (auto) the MCP runs the script itself: it presses Tools > Scripting > Execute Script File... of that CODESYS (chosen by PID, never the foreground window) through the Windows accessibility interface and fills the Open dialog, without moving the mouse or typing; success shows as ' [MCP]' at the end of the window title. With several CODESYS opened by hand it does not guess: it lists them; ASK THE USER and call again with pid. If the automation fails (e.g. a modal dialog is open in that CODESYS) the reply says why, and the user can run the script by hand: Tools > Scripting > Execute Script File..., pick the script (path in the reply). Then every tool for that install runs in that CODESYS. The MCP never closes or kills an attached CODESYS: shutdown_codesys (and the server stopping with --no-keep-alive) only detaches; with the default keep-alive the next session takes it over. Opening another project never closes one with unsaved changes (close_project saveFirst=false still does, as asked).",
     {
-      install: z.string().optional().describe(`Only attach a CODESYS of this install (${installLabels}). Default: whichever CODESYS runs the script.`),
-      waitSeconds: z.number().optional().describe('How long to wait for the script to be run. Default 180. 0: only write the script and report its path (and attach at once if it already ran).'),
+      install: z.string().optional().describe(`Only attach a CODESYS of this install (${installLabels}). Default: any installed version.`),
+      pid: z.number().optional().describe('The CODESYS process to attach (from the list a previous call gave). Needed when several CODESYS were opened by hand.'),
+      auto: z.boolean().optional().describe('Run the attach script automatically through the CODESYS menu (default true). false: only wait for the user to run it by hand.'),
+      waitSeconds: z.number().optional().describe('How long to wait for the script to be run by hand: default 180 when the automation was off or found no CODESYS, 0 after a failed automation (the reply then says why at once). 0: only write the script and report its path (and attach at once if it already ran); no automation.'),
     },
-    async (args: { install?: string; waitSeconds?: number }) => {
+    async (args: { install?: string; pid?: number; auto?: boolean; waitSeconds?: number }) => {
       if (config.mode !== 'persistent') {
         return { content: [{ type: 'text' as const, text: 'attach_codesys needs --mode persistent.' }], isError: true };
       }
@@ -1848,32 +1851,103 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         return { content: [{ type: 'text' as const, text: `Could not write the attach script: ${(err as Error).message}` }], isError: true };
       }
       const howTo =
-        `In the CODESYS to take over: Tools > Scripting > Execute Script File..., then pick\n  ${scriptPath}`;
-      const deadline = Date.now() + Math.max(0, args.waitSeconds ?? 180) * 1000;
-      for (;;) {
+        `By hand, in the CODESYS to take over: Tools > Scripting > Execute Script File..., then pick\n  ${scriptPath}`;
+      const attachedReply = (label: string, pid: number, how: string) => ({
+        content: [{
+          type: 'text' as const,
+          text: `Attached to CODESYS ${label} (PID ${pid}), opened by the user${how}. Tools for ${label} now run in it. ` +
+            `shutdown_codesys only detaches; the MCP never closes this CODESYS.`,
+        }],
+        isError: false,
+      });
+      const tryAttachNow = async (): Promise<{ label: string; pid: number } | null> => {
         for (const spec of specs) {
           const rt = runtimeFor(spec);
           if (!rt.launcher) continue;
           const pid = await rt.launcher.attach(0);
           if (pid !== null) {
             lastUsed = rt;
-            return {
-              content: [{
-                type: 'text' as const,
-                text: `Attached to CODESYS ${spec.label} (PID ${pid}), opened by the user. Tools for ${spec.label} now run in it. ` +
-                  `shutdown_codesys only detaches; the MCP never closes this CODESYS.`,
-              }],
-              isError: false,
-            };
+            return { label: spec.label, pid };
           }
         }
+        return null;
+      };
+
+      // The script may already have run (by hand, or a shortcut with --runscript).
+      const already = await tryAttachNow();
+      if (already) return attachedReply(already.label, already.pid, '');
+
+      let autoNote = '';
+      if (args.auto !== false && args.waitSeconds !== 0) {
+        const candidates: AttachCandidate[] = [];
+        for (const spec of specs) {
+          const rt = runtimeFor(spec);
+          if (!rt.launcher) continue;
+          for (const c of rt.launcher.attachCandidates()) {
+            candidates.push({ pid: c.pid, label: spec.label, title: rt.launcher.titleOf(c.pid) });
+          }
+        }
+        const outcome = await autoAttach({
+          candidates,
+          pid: args.pid,
+          automate: (pid) => runAttachAutomation(pid, scriptPath),
+          pickUp: async (c) => {
+            const spec = specs.find((x) => x.label === c.label);
+            const rt = spec ? runtimeFor(spec) : null;
+            if (!rt?.launcher) return null;
+            const pid = await rt.launcher.attach(20_000);
+            if (pid !== null) lastUsed = rt;
+            return pid;
+          },
+        });
+        if (outcome.kind === 'attached') {
+          return attachedReply(outcome.label, outcome.pid, ', automatically (the MCP ran the attach script through its Tools > Scripting menu)');
+        }
+        if (outcome.kind === 'choose') {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `Several CODESYS were opened by hand:\n${formatCandidates(outcome.candidates)}\n` +
+                `ASK THE USER which one to take over, then call attach_codesys again with pid.\n${howTo}`,
+            }],
+            isError: true,
+          };
+        }
+        if (outcome.kind === 'not-candidate') {
+          return {
+            content: [{
+              type: 'text' as const,
+              text: `PID ${outcome.pid} is not a CODESYS opened by hand of ${specs.map((x) => x.label).join(', ')} ` +
+                `(not running, already driven by an MCP session, or another program).` +
+                (outcome.candidates.length
+                  ? ` CODESYS that can be attached:\n${formatCandidates(outcome.candidates)}`
+                  : ' No CODESYS opened by hand is running.'),
+            }],
+            isError: true,
+          };
+        }
+        if (outcome.kind === 'failed') {
+          autoNote = `CODESYS ${outcome.label} PID ${outcome.pid}: ${describeAutomation(outcome.automation)}\n`;
+          serverLog.warn(`attach_codesys: ${autoNote.trim()}`);
+        } else {
+          autoNote = 'No CODESYS opened by hand is running, so there was nothing to attach automatically.\n';
+        }
+      }
+
+      // After a failed automation, answer at once (the reason matters more than
+      // a silent wait) unless the caller asked to wait for the manual step.
+      const waitDefault = autoNote.startsWith('CODESYS ') ? 0 : 180;
+      const deadline = Date.now() + Math.max(0, args.waitSeconds ?? waitDefault) * 1000;
+      for (;;) {
+        const got = await tryAttachNow();
+        if (got) return attachedReply(got.label, got.pid, '');
         if (Date.now() >= deadline) break;
         await new Promise((r) => setTimeout(r, 1000));
       }
       return {
         content: [{
           type: 'text' as const,
-          text: (args.waitSeconds === 0 ? 'Attach script written. ' : 'No CODESYS ran the attach script in time. ') + howTo +
+          text: autoNote + (args.waitSeconds === 0 ? 'Attach script written. ' : waitDefault === 0 && args.waitSeconds === undefined ? '' : 'No CODESYS ran the attach script in time. ') + howTo +
             `\nThen call attach_codesys again (or any tool: a launch takes an attached CODESYS over by itself).`,
         }],
         isError: args.waitSeconds !== 0,

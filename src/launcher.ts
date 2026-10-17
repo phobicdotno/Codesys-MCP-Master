@@ -208,7 +208,7 @@ export function buildLaunchQuestion(
     `  'leave'          - leave them as they are and start a new CODESYS next to them (remembered for this session)\n` +
     `  'close'          - close them like the window's X; CODESYS asks about unsaved changes itself\n` +
     `  'save-and-close' - save their unsaved projects first (where the MCP can reach them), then close them\n` +
-    `A CODESYS another live MCP session uses is always left alone. To work in one opened by hand instead, use attach_codesys.`
+    `A CODESYS another live MCP session uses is always left alone. To work in one opened by hand instead, use attach_codesys (it attaches automatically; pid picks one).`
   );
 }
 
@@ -459,6 +459,27 @@ export class CodesysLauncher implements ScriptExecutor {
       if (Date.now() >= deadline) return null;
       await this.sleep(1_000);
     }
+  }
+
+  /**
+   * CODESYS of this install that only the attach script can bring under the
+   * MCP: opened by hand (no session dir names its PID), or attached once and
+   * detached since (an attach session without a live watcher). Never the one
+   * this launcher drives, nor one another live MCP session uses, nor one
+   * whose watcher still answers (attach() or a launch takes that over).
+   */
+  attachCandidates(): RunningCodesys[] {
+    const sessions = this.sessionsByPid();
+    return this.findConflictingInstances().filter((p) => {
+      if (p.pid === this.pid && this.state === 'ready') return false;
+      const s = sessions.get(p.pid);
+      return !s || (s.attach && !s.dir && !s.foreignOwner);
+    });
+  }
+
+  /** Window title of a CODESYS ('' when unknown). */
+  titleOf(pid: number): string {
+    return (this.deps.windowTitle ?? windowTitleOf)(pid);
   }
 
   /** Session dirs of running CODESYS (from `running`) that this launcher may take over, newest first. */
@@ -920,7 +941,7 @@ export class CodesysLauncher implements ScriptExecutor {
         `of the same install already running (PID(s): ${pids}, exe: ` +
         `${this.config.codesysPath}) without a watcher that answers, so it ` +
         `cannot be taken over (a CODESYS opened by hand, or a busy one), and --single-instance is set. Close the existing window(s) ` +
-        `(the MCP never kills a CODESYS opened by hand; attach_codesys works in it instead). ` +
+        `(the MCP never kills a CODESYS opened by hand; attach_codesys attaches to it automatically and works in it instead). ` +
         `A CODESYS an ended MCP session left behind can be cleared with launch_codesys killExisting=true. ` +
         `Other CODESYS installs are unaffected and may keep running.`;
       launcherLog.warn(msg);

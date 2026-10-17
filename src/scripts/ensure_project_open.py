@@ -63,8 +63,9 @@ def check_project_lock(project_path):
     if alive:
         raise ProjectInUseError(
             "Project '%s' is already open in another CODESYS on this PC (PID %d, user '%s'). "
-            "Use that instance (its MCP session), or close the project there, then retry. "
-            "Opening it twice would only give a read-only copy." % (project_path, pid, user))
+            "Use that instance (its MCP session; one opened by hand: attach_codesys with pid %d "
+            "takes it over automatically), or close the project there, then retry. "
+            "Opening it twice would only give a read-only copy." % (project_path, pid, user, pid))
     try:
         os.remove(lock)
         print("DEBUG: Removed stale lock %s (CODESYS PID %d is gone)." % (lock, pid))
