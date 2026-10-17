@@ -122,8 +122,8 @@ export function loginFailureHint(output: string): string | null {
       'or tunnel dropped (reboot the PLC).';
   }
   if (/Stack empty/i.test(text)) {
-    return 'create_online_application failed with "Stack empty": a modal dialog is probably open in CODESYS (for example ' +
-      'a network scan result). Close it, then retry.';
+    return '"Stack empty" from the online layer: a modal dialog is probably open in CODESYS (for example a network scan ' +
+      'result); close it and retry. With a watcher older than 0.6.0 it is the timer-watcher bug instead: restart that CODESYS.';
   }
   if (/No active path/i.test(text)) {
     return 'The device has no active path: bind it with rebind_device_to_scan_result (matchAddress "host:port" for a tunnel).';
@@ -188,7 +188,13 @@ export async function preLoginProbe(projectPath: string, file = ipBindingsFile()
   if (!ip) return { block: null, note: null };
   const p = await probeRuntime(ip.host, ip.port);
   const verdict = probeVerdict(p);
-  if (verdict) return { block: `Pre-login check FAILED: ${verdict}`, note: null };
+  if (verdict) {
+    return {
+      block: `Pre-login check FAILED: ${verdict} (Checked ${addr}, the address this project was last bound to with ` +
+        `rebind_device_to_scan_result. If the project now uses another binding, rebind it and this record follows.)`,
+      note: null,
+    };
+  }
   if (p.state === 'closed') {
     return {
       block: null,

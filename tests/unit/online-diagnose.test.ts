@@ -89,6 +89,9 @@ describe('loginFailureHint', () => {
   it('points at a modal dialog for Stack empty', () => {
     expect(loginFailureHint('create_online_application() failed: Stack empty.')).toMatch(/modal dialog/);
   });
+  it('points at rebinding for No active path', () => {
+    expect(loginFailureHint('No active path defined')).toMatch(/rebind_device_to_scan_result/);
+  });
   it('stays quiet for unknown output', () => {
     expect(loginFailureHint('Invalid user authentication on the target')).toBeNull();
   });
@@ -113,6 +116,7 @@ describe('IP bindings and the pre-login probe', () => {
     rememberIpBinding('C:/plc/B.project', `127.0.0.1:${gone}`, f);
     const refused = await preLoginProbe('C:/plc/B.project', f);
     expect(refused.block).toMatch(/^Pre-login check FAILED/);
+    expect(refused.block).toMatch(/rebind it and this record follows/);
 
     const drop = await server('drop');
     rememberIpBinding('C:/plc/B.project', `127.0.0.1:${drop}`, f);
