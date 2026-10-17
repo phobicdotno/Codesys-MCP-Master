@@ -131,3 +131,22 @@ describe('IP bindings and the pre-login probe', () => {
     expect(await preLoginProbe('C:/plc/B.project', f)).toEqual({ block: null, note: null });
   });
 });
+
+describe('stale session and gateway link', () => {
+  it('recognises the stale online session error', async () => {
+    const { isStaleOnlineSession, isGatewayNotConfigured } = await import('../../src/online-diagnose');
+    expect(isStaleOnlineSession('Exception was raised: An item with the same key has already been added.')).toBe(true);
+    expect(isStaleOnlineSession('Login failed')).toBe(false);
+    expect(isGatewayNotConfigured('Gateway not configured properlyDo you want to continue')).toBe(true);
+  });
+
+  it('tells whether CODESYS has its own gateway connection', async () => {
+    const { gatewayLinkNote } = await import('../../src/online-diagnose');
+    const linked = await gatewayLinkNote(7, async () => [{ remotePort: 1217, state: 'Established' }]);
+    expect(linked).toMatch(/is connected to its gateway/);
+    const lost = await gatewayLinkNote(7, async () => [{ remotePort: 443, state: 'Established' }, { remotePort: 1217, state: 'TimeWait' }]);
+    expect(lost).toMatch(/has no connection to its gateway.*press Enter/s);
+    expect(await gatewayLinkNote(7, async () => null)).toBeNull();
+    expect(await gatewayLinkNote(null)).toBeNull();
+  });
+});

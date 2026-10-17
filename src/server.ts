@@ -42,7 +42,8 @@ import { uncPathError } from './path-guard';
 import { readSelection } from './state-read';
 import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
-import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote } from './online-diagnose';
+import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isStaleOnlineSession, isGatewayNotConfigured, gatewayLinkNote, PreLoginCheck } from './online-diagnose';
+import { clearIdeDialogs } from './ide-dialogs';
 
 /**
  * Executor used in persistent mode whenever the launcher isn't running yet:
@@ -1549,6 +1550,61 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
   // Every script goes to the install of the current tool call.
   const executor: ScriptExecutor = {
     executeScript: (content: string, timeoutMs?: number) => cur().executor.executeScript(content, timeoutMs),
+  };
+
+  /**
+   * Before a login: answer the harmless CODESYS boxes (a modal box blocks every
+   * script), refuse on any other, then probe a PLC bound by IP.
+   */
+  const prepareOnline = async (escaped: string): Promise<{ block: string | null; probe: PreLoginCheck; answered: string[] }> => {
+    const dialogs = await clearIdeDialogs(cur().launcher?.getStatus().pid ?? null);
+    if (dialogs.block) return { block: dialogs.block, probe: { block: null, note: null }, answered: dialogs.answered };
+    const probe = await preLoginProbe(escaped);
+    return { block: probe.block, probe, answered: dialogs.answered };
+  };
+
+  /**
+   * Runs a login script. On "An item with the same key has already been
+   * added" (CODESYS keeps half an online session after failed logins; retrying
+   * in the same CODESYS never helps) a CODESYS this server started is closed
+   * and the script runs once more in a fresh one. Unsaved projects stop that
+   * with the usual question; a CODESYS the user opened is never closed.
+   */
+  const runOnline = async (script: string, timeoutMs: number): Promise<{ result: IpcResult; recovery: string | null }> => {
+    const result = await executor.executeScript(script, timeoutMs);
+    if ((result.success && result.output.includes('SCRIPT_SUCCESS')) || !isStaleOnlineSession(result.output)) {
+      return { result, recovery: null };
+    }
+    const launcher = cur().launcher;
+    if (!launcher || launcher.attached) return { result, recovery: null };
+    try {
+      await launcher.shutdown({ unsaved: 'ask' });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { result, recovery: `CODESYS holds a stale online session and was not restarted: ${msg}` };
+    }
+    const retry = await executor.executeScript(script, timeoutMs);
+    return {
+      result: retry,
+      recovery: 'CODESYS held a stale online session from earlier failed logins ("An item with the same key has already ' +
+        'been added"). This server had started that CODESYS and it had no unsaved changes, so it was closed and the call ' +
+        'ran once more in a fresh one.',
+    };
+  };
+
+  /** A login tool's reply: what was done automatically, then the result (with the runtime note on failure). */
+  const onlineReply = async (
+    r: { result: IpcResult; recovery: string | null },
+    prep: { probe: PreLoginCheck; answered: string[] },
+    successMessage: string,
+  ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError: boolean }> => {
+    const reply = withProbeNote(formatToolResponse(r.result, successMessage), prep.probe);
+    const gateway = reply.isError && isGatewayNotConfigured(r.result.output)
+      ? await gatewayLinkNote(cur().launcher?.getStatus().pid ?? null)
+      : null;
+    const before = [...prep.answered, ...(r.recovery ? [r.recovery] : []), ...(gateway ? [gateway] : [])];
+    if (before.length === 0) return reply;
+    return { ...reply, content: reply.content.map((c) => ({ ...c, text: `${before.join('\n')}\n\n${c.text}` })) };
   };
 
   // Keep the attach script current: desktop shortcuts start CODESYS with
@@ -3246,8 +3302,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       rememberDeviceCredentials(args.deviceUser, args.devicePassword, escaped);
       const deviceUser = args.deviceUser || rememberedDeviceUser(escaped);
       const devicePassword = args.devicePassword || rememberedDevicePassword(escaped);
-      const probe = await preLoginProbe(escaped);
-      if (probe.block) return { content: [{ type: 'text' as const, text: probe.block }], isError: true };
+      const prep = await prepareOnline(escaped);
+      if (prep.block) return { content: [{ type: 'text' as const, text: [...prep.answered, prep.block].join('\n') }], isError: true };
       const script = scriptManager.prepareScriptWithHelpers(
         'connect_to_device',
         {
@@ -3260,8 +3316,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       );
       // Tool-side timeout = wait window + 30s headroom for actual login work
       const ipcTimeoutMs = (waitSec + 30) * 1000;
-      const result = await executor.executeScript(script, ipcTimeoutMs);
-      return withProbeNote(formatToolResponse(result, `Connected to device for ${args.projectFilePath}.`), probe);
+      return onlineReply(await runOnline(script, ipcTimeoutMs), prep, `Connected to device for ${args.projectFilePath}.`);
     }
   );
 
@@ -5749,8 +5804,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       // with skipReachabilityCheck: a runtime that drops connections makes
       // every login fail with a misleading gateway error, and each failed
       // login leaves CODESYS a bit more stuck.
-      const probe = await preLoginProbe(escaped);
-      if (probe.block) return { content: [{ type: 'text' as const, text: probe.block }], isError: true };
+      const prep = await prepareOnline(escaped);
+      if (prep.block) return { content: [{ type: 'text' as const, text: [...prep.answered, prep.block].join('\n') }], isError: true };
 
       // Pre-flight: scan the gateway and confirm the cached device address
       // matches a live target. Stale binding is the #1 cause of "download
@@ -5807,8 +5862,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       );
       // Tool-side timeout = wait window + 120s headroom for the actual download
       const ipcTimeoutMs = (waitSec + 120) * 1000;
-      const result = await executor.executeScript(script, ipcTimeoutMs);
-      return withProbeNote(formatToolResponse(result, `Application downloaded to device for ${args.projectFilePath}.`), probe);
+      return onlineReply(await runOnline(script, ipcTimeoutMs), prep, `Application downloaded to device for ${args.projectFilePath}.`);
     }
   );
 

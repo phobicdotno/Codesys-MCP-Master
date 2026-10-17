@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 /**
  * Online diagnostics: tell a dead PLC runtime apart from a stuck IDE.
@@ -210,4 +211,57 @@ export async function preLoginProbe(projectPath: string, file = ipBindingsFile()
 /** The tool response for a failed online call, with the pre-login note in front when there is one. */
 export function withNote(text: string, check: PreLoginCheck): string {
   return check.note ? `${check.note}\n\n${text}` : text;
+}
+
+/** "An item with the same key has already been added": CODESYS keeps half an online session. */
+export function isStaleOnlineSession(output: string): boolean {
+  return /An item with the same key has already been added/i.test(output ?? '');
+}
+
+/** "Gateway not configured properly" in a login failure. */
+export function isGatewayNotConfigured(output: string): boolean {
+  return /Gateway not configured properly/i.test(output ?? '');
+}
+
+export type TcpLister = (pid: number) => Promise<Array<{ remotePort: number; state: string }> | null>;
+
+/** Established TCP connections of a process (PowerShell Get-NetTCPConnection); null when it cannot be read. */
+export const defaultTcpLister: TcpLister = (pid) =>
+  new Promise((resolve) => {
+    if (process.platform !== 'win32') return resolve(null);
+    const cmd = `Get-NetTCPConnection -OwningProcess ${Math.trunc(pid)} -ErrorAction SilentlyContinue | ` +
+      `Select-Object RemotePort,@{n='State';e={[string]$_.State}} | ConvertTo-Json -Compress`;
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    const timer = setTimeout(() => { child.kill(); resolve(null); }, 15_000);
+    child.stdout.on('data', (d) => (out += d.toString()));
+    child.on('error', () => { clearTimeout(timer); resolve(null); });
+    child.on('close', () => {
+      clearTimeout(timer);
+      if (!out.trim()) return resolve([]);
+      try {
+        const v = JSON.parse(out);
+        const rows = Array.isArray(v) ? v : [v];
+        resolve(rows.map((r: { RemotePort: number; State: string }) => ({ remotePort: Number(r.RemotePort), state: String(r.State) })));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+
+/**
+ * After "Gateway not configured properly": does this CODESYS have its own
+ * connection to the gateway (default port 1217)? On 2026-10-17 it had none
+ * after the PLC dropped; selecting the address in Communication Settings and
+ * pressing Enter brought it back. Returns a sentence for the reply, or null.
+ */
+export async function gatewayLinkNote(pid: number | null, list: TcpLister = defaultTcpLister, gatewayPort = 1217): Promise<string | null> {
+  if (pid === null) return null;
+  const conns = await list(pid);
+  if (conns === null) return null;
+  const linked = conns.some((c) => c.remotePort === gatewayPort && /established/i.test(c.state));
+  return linked
+    ? `CODESYS (PID ${pid}) is connected to its gateway (port ${gatewayPort}), so the gateway reached no runtime: check the PLC side.`
+    : `CODESYS (PID ${pid}) has no connection to its gateway (port ${gatewayPort}). In the device's Communication Settings ` +
+      `select the device address and press Enter (that reconnected it on 2026-10-17), or restart that CODESYS; then retry.`;
 }
