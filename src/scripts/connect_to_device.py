@@ -104,9 +104,18 @@ try:
             last_err = e
             # Print only the short error to keep log readable
             print("DEBUG: %s failed: %s: %s" % (desc, type(e).__name__, e))
+            # A TypeError means this call shape does not fit the SP's login()
+            # signature: try the next one. Any other exception means the shape
+            # was accepted and the login itself failed (no gateway, refused,
+            # K-bus mismatch, a prompt answered by the script engine). Stop
+            # there: every further accepted shape logs in again and can run a
+            # full download each time, which kept the IDE busy for minutes and
+            # downloaded the same application 18 times in a row.
+            if not isinstance(e, TypeError):
+                break
 
     if not logged_in:
-        raise RuntimeError("All login() call shapes failed. Last error: %s" % last_err)
+        raise RuntimeError("Login failed: %s" % last_err)
     print("DEBUG: login() returned. Waiting up to %d seconds for state to stabilise" % LOGIN_WAIT_SECONDS)
 
     # Poll application_state. login() may return before the application
