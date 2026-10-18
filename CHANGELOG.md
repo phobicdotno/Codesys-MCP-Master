@@ -6,6 +6,13 @@ Until v0.19.0 the project was called Codesys-MCP-SP21+ (npm package `codesys-mcp
 
 ## Unreleased
 
+- **The PLC no longer runs one version behind** (`src/next-version.ts`). The usual order is: change in CODESYS, download to the PLC, then ask for the release. The release bumped the version, so the PLC always reported the previous number, and the next download, made before the next release, lagged again. Now:
+  - Right after a release, `release_project_version` moves the working copy to the next build number (build part +1) and, when the repo has a `drive-archive/` folder, to the next Drive file name (`_NNN` +1). That is committed and pushed without a tag. A download made from then on reports the number the next release gives it.
+  - A working copy that already carries a version above the latest `v*` tag is released under that number, with no second bump. The version GVL then differs from the tag only because of the preparation, so it is not counted as a change, and the binary is compared with the preparation commit. A change level above build is noted in the release label, not used to renumber.
+  - After a release the `.project` on disk is the prepared copy. The reply says how to take the released binary from the tag for a Drive upload or archive.
+  - `prepareNext: false` keeps the old behaviour.
+  - `bump_project_version.py` takes an optional `DRIVE_FILE`. The version GVL comment about `sDriveFile` now says how the name moves.
+
 - **A slow full download is not a loop; the download timeout now allows for it.** Over an SSH tunnel on a slow VPN a full download of a 5 MB application took about 2 minutes, and the PLC's runtime.log shows one "Download successful, create bootproject: 0" line per chunk, every 3 to 4 seconds. With 2 minutes of headroom `download_to_device` timed out while CODESYS was still downloading, and the steady log lines were taken for a download loop and the download killed (twice, 2026-10-17). Now:
   - `download_to_device` waits up to 10 minutes plus the login wait.
   - A timed-out (or abandoned) login command comes back as a normal failed reply instead of a bare exception, starting with what it means: CODESYS may still be working, one log line per chunk is a download in progress, do not kill CODESYS, wait until the log stops growing.

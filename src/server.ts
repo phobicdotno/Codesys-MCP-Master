@@ -44,6 +44,7 @@ import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
 import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isGatewayNotConfigured, gatewayLinkNote, runWithRecovery, hasGatewayLink, PreLoginCheck } from './online-diagnose';
 import { clearIdeDialogs } from './ide-dialogs';
+import { cmpVersion, isPreparedAhead, nextBuild, nextDriveFile, readMirrorVersion, withoutVersionGvl } from './next-version';
 
 /**
  * Executor used in persistent mode whenever the launcher isn't running yet:
@@ -510,6 +511,23 @@ function readTagShas(projectDir: string, tagName: string): { project?: string; m
     project: projMatch ? projMatch[1] : undefined,
     mirror: mirMatch ? mirMatch[1] : undefined,
   };
+}
+
+/**
+ * SHA-256 of the .project as committed at HEAD. In a working copy prepared
+ * for the next build, HEAD is the preparation commit, so an unchanged binary
+ * means nothing was edited since then. undefined if git cannot show it.
+ */
+function committedProjectSha(projectDir: string, projectFileName: string): string | undefined {
+  try {
+    const buf = execSync(`git -C "${projectDir}" show "HEAD:${projectFileName}"`, {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 512 * 1024 * 1024,
+    });
+    return crypto.createHash('sha256').update(buf).digest('hex');
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -6586,13 +6604,14 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'release_project_version',
-    "ONE-SHOT release pipeline. Runs the full sync from a CODESYS code change all the way to a tagged + pushed git commit, with no manual orchestration in between. Sequence: (1) mirror_export refreshes mcp-mirror/; (2) classifier diffs the new mirror against the latest v* tag; (3) if no changes, short-circuits with 'no version change'; (4) otherwise bump_project_version with the resolved level; (5) regenerate library.md as markdown; (6) regenerate pou-dump.md as markdown; (7) regex-replace the version reference in README.md; (8) Changelog.md auto-appended with the new entry (timestamp + classification evidence); (9) git add the controlled paths only (mcp-mirror, the four .md files, .gitignore, the .project binary); (10) git commit; (11) git tag v<new>; (12) git push --follow-tags. Standard workflow: ask Claude to run release_project_version after every confirmed change in CODESYS. Requires the project's parent dir to be a git repo with a configured remote.",
+    "ONE-SHOT release pipeline. Runs the full sync from a CODESYS code change all the way to a tagged + pushed git commit, with no manual orchestration in between. Sequence: (1) mirror_export refreshes mcp-mirror/; (2) classifier diffs the new mirror against the latest v* tag; (3) if no changes, short-circuits with 'no version change'; (4) otherwise bump_project_version with the resolved level; (5) regenerate library.md as markdown; (6) regenerate pou-dump.md as markdown; (7) regex-replace the version reference in README.md; (8) Changelog.md auto-appended with the new entry (timestamp + classification evidence); (9) git add the controlled paths only (mcp-mirror, the four .md files, .gitignore, the .project binary); (10) git commit; (11) git tag v<new>; (12) git push --follow-tags; (13) prepare the working copy for the next build: build part +1 (and the next Drive file name when the repo has drive-archive/), committed and pushed without a tag, so a download made before the next release already reports the number that release gives it. A working copy that already carries a version above the latest tag is released under that number with no second bump. After step 13 the .project on disk is the prepared copy: take the released binary from the tag (git show v<new>:<file>) for Drive uploads and archives. Standard workflow: ask Claude to run release_project_version after every confirmed change in CODESYS. Requires the project's parent dir to be a git repo with a configured remote.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       push: z.boolean().optional().describe("Push to origin after commit/tag. Default true."),
+      prepareNext: z.boolean().optional().describe("After the release, move the working copy to the next build number (and next Drive file name) so the next download reports the number its release gets. Default true."),
       allowVersionUpgrade: z.boolean().optional().describe("Override the CODESYS version-pin guard. The guard refuses to save when this server's install differs from the project's pinned version (.codesys-version, else library.md's 'CODESYS Development System' row), because saving converts the project and the committed binary stops matching what runs on the device. Only set true when the conversion is deliberate."),
     },
-    async (args: { projectFilePath: string; push?: boolean; allowVersionUpgrade?: boolean }) => {
+    async (args: { projectFilePath: string; push?: boolean; allowVersionUpgrade?: boolean; prepareNext?: boolean }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
       // Guard FIRST: this pipeline saves the .project, and a save on a
       // mismatched install converts it. A converted binary that has already
@@ -6671,17 +6690,34 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         log.push(`WARNING: ${mirrorDirName}/ tree differed from the last tag's mirror-sha256 BEFORE mirror_export ran, while the .project binary did not change. This usually means you edited .st files in the mirror directly. mirror_export has now overwritten those edits with the current binary state. (mirror_import is not yet implemented; for now, make code changes via the IDE or set_pou_code so they reach the binary first.)`);
       }
 
+      // 1a. Version-ahead: was the working copy prepared for the next build
+      // after the last release (see next-version.ts)? Then it is released
+      // under the number it already carries, which is also the number a PLC
+      // downloaded from it reports. The version GVL then differs from the tag
+      // only because of the preparation, so it is not a code change, and the
+      // binary is compared with the prepared commit (HEAD), not with the tag.
+      const workingVersion = readMirrorVersion(mirrorDir);
+      const preparedAhead = isPreparedAhead(workingVersion.version, priorTag);
+      if (preparedAhead) {
+        log.push(`working copy already carries v${workingVersion.version}${workingVersion.driveFile ? ` / ${workingVersion.driveFile}` : ''} (prepared after ${priorTag}): released under that number, no second bump`);
+      }
+
       // 2. Classify mirror diff vs latest v* tag
       let classification = classifyMcpMirrorChanges(projectDir, mirrorDirName);
+      if (preparedAhead) classification = withoutVersionGvl(classification);
       // SHA fallback (case c): mirror diff is empty but the project binary
       // SHA changed. Promote a 'no-changes' classification to a build-level
       // bump so non-textual changes still tick the version.
       let shaPromotedToBuild = false;
-      if (classification.kind === 'no-changes' && priorShas.project !== undefined && projectShaNow !== priorShas.project) {
+      const shaBaseline = preparedAhead ? committedProjectSha(projectDir, path.basename(escaped)) : priorShas.project;
+      if (preparedAhead && classification.kind === 'no-changes' && shaBaseline !== undefined && projectShaNow === shaBaseline) {
+        classification.evidence.push(`nothing changed since ${priorTag} apart from the preparation for v${workingVersion.version}`);
+      }
+      if (classification.kind === 'no-changes' && shaBaseline !== undefined && projectShaNow !== shaBaseline) {
         shaPromotedToBuild = true;
         const evidence = [
           ...classification.evidence,
-          `binary .project SHA changed (${priorShas.project.slice(0, 12)}... -> ${projectShaNow.slice(0, 12)}...) but no mirror diff: likely device-tree / library refs / task config / visu / Save() touch; classifying as build bump`,
+          `binary .project SHA changed (${shaBaseline.slice(0, 12)}... -> ${projectShaNow.slice(0, 12)}...) but no mirror diff: likely device-tree / library refs / task config / visu / Save() touch; classifying as build bump`,
         ];
         classification = { kind: 'bump', level: 'build', evidence };
       }
@@ -6735,24 +6771,37 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         };
       }
       const resolvedLevel = classification.kind === 'first-run' ? 'build' : classification.level;
-      const levelLabel = classification.kind === 'first-run' ? 'seed' : `auto: ${resolvedLevel}${shaPromotedToBuild ? ' (sha-fallback)' : ''}`;
+      const levelLabel = classification.kind === 'first-run'
+        ? 'seed'
+        : preparedAhead
+          ? `prepared ahead; change level ${resolvedLevel}${shaPromotedToBuild ? ' (sha-fallback)' : ''}`
+          : `auto: ${resolvedLevel}${shaPromotedToBuild ? ' (sha-fallback)' : ''}`;
       log.push(`classifier: ${levelLabel} (${classification.evidence.length} evidence item(s))`);
 
-      // 3. Bump
-      const bumpScript = scriptManager.prepareScriptWithHelpers(
-        'bump_project_version',
-        { PROJECT_FILE_PATH: escaped, LEVEL: resolvedLevel },
-        ['ensure_project_open']
-      );
-      const bumpRes = await executor.executeScript(bumpScript);
-      if (!bumpRes.success || !bumpRes.output.includes('SCRIPT_SUCCESS')) {
-        return formatToolResponse(bumpRes, 'release_project_version: bump_project_version failed');
+      // 3. Bump. A prepared working copy keeps its number: that is the number
+      // a PLC downloaded from it already reports.
+      let from: string | null;
+      let newVersion: string | null;
+      if (preparedAhead) {
+        from = priorTag.replace(/^v/, '');
+        newVersion = workingVersion.version as string;
+        log.push(`bump: skipped, v${newVersion} was set when v${from} was released`);
+      } else {
+        const bumpScript = scriptManager.prepareScriptWithHelpers(
+          'bump_project_version',
+          { PROJECT_FILE_PATH: escaped, LEVEL: resolvedLevel, DRIVE_FILE: '' },
+          ['ensure_project_open']
+        );
+        const bumpRes = await executor.executeScript(bumpScript);
+        if (!bumpRes.success || !bumpRes.output.includes('SCRIPT_SUCCESS')) {
+          return formatToolResponse(bumpRes, 'release_project_version: bump_project_version failed');
+        }
+        ({ from, to: newVersion } = parseBumpedVersion(bumpRes.output));
+        if (!newVersion) {
+          return { content: [{ type: 'text' as const, text: 'release_project_version: bump succeeded but new version could not be parsed' }], isError: true };
+        }
+        log.push(`bump: ${from ?? '(none)'} -> ${newVersion}`);
       }
-      const { from, to: newVersion } = parseBumpedVersion(bumpRes.output);
-      if (!newVersion) {
-        return { content: [{ type: 'text' as const, text: 'release_project_version: bump succeeded but new version could not be parsed' }], isError: true };
-      }
-      log.push(`bump: ${from ?? '(none)'} -> ${newVersion}`);
 
       // 3a. SANITY CHECK: the new version MUST be strictly greater than the
       // latest v* tag. Defensive guard against silent version regressions
@@ -6788,16 +6837,6 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       }
       if (latestTag) {
         const tagV = latestTag.replace(/^v/, '');
-        const cmpVersion = (a: string, b: string): number => {
-          const A = a.split('.').map((n) => parseInt(n, 10) || 0);
-          const B = b.split('.').map((n) => parseInt(n, 10) || 0);
-          while (A.length < 4) A.push(0);
-          while (B.length < 4) B.push(0);
-          for (let i = 0; i < 4; i++) {
-            if (A[i] !== B[i]) return A[i] - B[i];
-          }
-          return 0;
-        };
         if (cmpVersion(newVersion, tagV) <= 0) {
           return {
             content: [{ type: 'text' as const, text:
@@ -6831,7 +6870,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       // on MCPTest2 v1.1.0.0 (commit 8d79193): the binary GVL was
       // 1.0.2.0 while the docs said 1.1.0.0 because mirror_export
       // didn't re-run after the bump.
-      try {
+      // Skipped for a prepared copy: nothing was bumped, so nothing changed.
+      if (!preparedAhead) try {
         const mirrorScript2 = scriptManager.prepareScriptWithHelpers(
           'mirror_export',
           { PROJECT_FILE_PATH: escaped, MIRROR_ROOT: mirrorDir },
@@ -6941,6 +6981,53 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           }],
           isError: true,
         };
+      }
+
+      // 9. Prepare the working copy for the next build, so the next download
+      // already carries the number the next release will give it. Without
+      // this the PLC always ran the latest code under the previous number:
+      // downloads happen before the release that bumps.
+      const projName = path.basename(escaped);
+      const releasedBinaryCmd = `git -C "${projectDir}" show "v${newVersion}:${projName}" > "<file>"`;
+      if (args.prepareNext !== false) {
+        const nextVersion = nextBuild(newVersion);
+        const hasDriveArchive = fs.existsSync(path.join(projectDir, 'drive-archive'));
+        const releasedDrive = readMirrorVersion(mirrorDir).driveFile;
+        const nextDrive = hasDriveArchive ? nextDriveFile(releasedDrive) : undefined;
+        try {
+          const prepScript = scriptManager.prepareScriptWithHelpers(
+            'bump_project_version',
+            { PROJECT_FILE_PATH: escaped, LEVEL: 'build', DRIVE_FILE: nextDrive ?? '', SEED_VERSION: '' },
+            ['ensure_project_open']
+          );
+          const prepRes = await executor.executeScript(prepScript);
+          const prepared = parseBumpedVersion(prepRes.output).to;
+          if (!prepRes.success || !prepRes.output.includes('SCRIPT_SUCCESS') || !prepared || cmpVersion(prepared, newVersion) <= 0) {
+            log.push(`next build: NOT prepared (bump failed or gave ${prepared ?? 'nothing'}); the next download will report v${newVersion}`);
+          } else {
+            const mirrorScript3 = scriptManager.prepareScriptWithHelpers(
+              'mirror_export',
+              { PROJECT_FILE_PATH: escaped, MIRROR_ROOT: mirrorDir },
+              ['ensure_project_open']
+            );
+            const mirror3 = await executor.executeScript(mirrorScript3);
+            if (!mirror3.success || !mirror3.output.includes('SCRIPT_SUCCESS')) {
+              log.push('next build: WARNING, mirror export after the preparation failed');
+            }
+            execSync(`git -C "${projectDir}" add "${mirrorDirName}" "${projName}"`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+            gitCommitWithMessage(
+              projectDir,
+              `Prepare v${prepared}${nextDrive ? ` / ${nextDrive}` : ''} for the next download (not released)\n\n` +
+              `The working copy now carries the number the next release gives it, so\n` +
+              `a PLC downloaded from it reports that number. v${newVersion} is released.\n`
+            );
+            if (doPush) execSync(`git -C "${projectDir}" push`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
+            log.push(`next build: working copy prepared as v${prepared}${nextDrive ? ` / ${nextDrive}` : ''} (committed${doPush ? ' and pushed' : ''}, no tag). Downloads from now on report that number.`);
+            log.push(`released binary: the .project on disk is now the prepared copy. Upload or archive the released one from the tag: ${releasedBinaryCmd}`);
+          }
+        } catch (e) {
+          log.push(`next build: NOT prepared (${e instanceof Error ? e.message : String(e)}); the next download will report v${newVersion}`);
+        }
       }
 
       return {

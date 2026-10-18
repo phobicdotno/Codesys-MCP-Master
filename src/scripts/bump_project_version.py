@@ -24,6 +24,12 @@ LEVEL = "{LEVEL}"  # major | minor | revision | build
 # was never set does not jump out of an already-tagged release series.
 SEED_VERSION = "{SEED_VERSION}"
 
+# Optional sDriveFile override ('' = carry the current value). The release
+# tool passes the next Drive name when it prepares the working copy for the
+# next build right after a release, so a download made before the next
+# release already reports the Drive file it will be uploaded as.
+DRIVE_FILE = "{DRIVE_FILE}"
+
 VALID_LEVELS = ('major', 'minor', 'revision', 'build')
 
 # Standard runtime-readable version anchor. Lives as a constant in a GVL
@@ -112,11 +118,14 @@ RESERVED_GVL_NAMES = ('sVersion', 'sDriveFile', 'uiLibraryCount')
 def next_drive_file_name(existing_decl, project_file_path):
     """Carry the Drive export name ('<project stem>_NNN', e.g.
     VesselA_PLC_00_006) through version bumps UNCHANGED.
-    KK convention update 2026-07-24: the number advances only when a build is
-    actually uploaded to Drive (set manually in the GVL at upload time), NOT on
-    every bump -- auto-increment per bump burned through numbers for builds that
-    never left the machine. Seed '<stem>_001' from the project filename only
-    when the variable is absent."""
+    The number does not advance on every bump: auto-increment per bump burned
+    through numbers for builds that never left the machine. It advances once
+    per release, when the release tool prepares the next build and passes the
+    next name as DRIVE_FILE (projects with a drive-archive/ only). Seed
+    '<stem>_001' from the project filename only when the variable is absent."""
+    override = DRIVE_FILE.strip()
+    if override and not override.startswith('{'):
+        return override
     m = re.search(r"sDriveFile\s*:\s*STRING\s*:=\s*'([^']*)'", existing_decl or '')
     if m and m.group(1):
         return m.group(1)
@@ -198,9 +207,9 @@ def build_version_gvl_declaration(version_str, libraries, drive_file=''):
         "{attribute 'qualified_only'}",
         "VAR_GLOBAL",
         "    sVersion : STRING := '%s';" % version_str,
-        "    // Drive export name for THIS build (maintained by bump_project_version;",
-        "    // incremented on every version bump - gaps mean a version was never",
-        "    // uploaded). The running PLC reports which Drive file it came from.",
+        "    // Drive export name for THIS build. Moved to the next number right",
+        "    // after each release, so a download carries the name of the upload",
+        "    // it becomes. The running PLC reports which Drive file it came from.",
         "    sDriveFile : STRING := '%s';" % drive_file,
         "    // Library manifest - one STRING per library: the variable NAME is the",
         "    // library namespace, the value its resolved version. Maintained by",
