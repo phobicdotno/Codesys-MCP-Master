@@ -11,6 +11,8 @@ Until v0.19.0 the project was called Codesys-MCP-SP21+ (npm package `codesys-mcp
   - A working copy that already carries a version above the latest `v*` tag is released under that number, with no second bump. The version GVL (and the generated `Project Information/GetVersion*` constants) then differ from the tag only because of the preparation, so it is not counted as a change, and the binary is compared with the preparation commit. A change level above build is noted in the release label, not used to renumber.
   - After a release the `.project` on disk is the prepared copy. The reply says how to take the released binary from the tag for a Drive upload or archive.
   - `prepareNext: false` keeps the old behaviour.
+  - The release first saves a project with unsaved changes (only then, so an unchanged binary is not rewritten). A prepared copy has no bump, and the bump used to be the only save: an edit unsaved in an attached IDE would have reached the mirror but not the tagged binary.
+  - A failed preparation says what state it left: prepared and committed but not pushed, or saved but not committed.
   - `bump_project_version.py` takes an optional `DRIVE_FILE`. The version GVL comment about `sDriveFile` now says how the name moves.
 
 - **A slow full download is not a loop; the download timeout now allows for it.** Over an SSH tunnel on a slow VPN a full download of a 5 MB application took about 2 minutes, and the PLC's runtime.log shows one "Download successful, create bootproject: 0" line per chunk, every 3 to 4 seconds. With 2 minutes of headroom `download_to_device` timed out while CODESYS was still downloading, and the steady log lines were taken for a download loop and the download killed (twice, 2026-10-17). Now:

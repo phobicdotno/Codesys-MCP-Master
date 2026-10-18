@@ -44,7 +44,7 @@ import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
 import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isGatewayNotConfigured, gatewayLinkNote, runWithRecovery, hasGatewayLink, PreLoginCheck } from './online-diagnose';
 import { clearIdeDialogs } from './ide-dialogs';
-import { cmpVersion, isPreparedAhead, nextBuild, nextDriveFile, readMirrorVersion, withoutVersionGvl } from './next-version';
+import { cmpVersion, isPreparedAhead, nextDriveFile, readMirrorVersion, withoutVersionGvl } from './next-version';
 
 /**
  * Executor used in persistent mode whenever the launcher isn't running yet:
@@ -6652,6 +6652,16 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       // history).
       const mirrorDir = resolveMirrorRoot(escaped);
       const mirrorDirName = path.basename(mirrorDir);
+      // Save unsaved changes first. A prepared working copy is released without a bump, and
+      // the bump was the only step that saved: an edit still unsaved in an
+      // attached IDE would reach the mirror (exported from memory) but not
+      // the tagged .project. Saving also makes the SHA below see it.
+      const saveRes = await executor.executeScript(
+        scriptManager.prepareScriptWithHelpers('save_project_if_dirty', { PROJECT_FILE_PATH: escaped }, ['ensure_project_open'])
+      );
+      if (!saveRes.success || !saveRes.output.includes('SCRIPT_SUCCESS')) {
+        return formatToolResponse(saveRes, 'release_project_version: saving the project before the release failed');
+      }
       const projectShaNow = (() => {
         try { return sha256OfFile(escaped); } catch { return ''; }
       })();
@@ -6988,12 +6998,13 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       // this the PLC always ran the latest code under the previous number:
       // downloads happen before the release that bumps.
       const projName = path.basename(escaped);
-      const releasedBinaryCmd = `git -C "${projectDir}" show "v${newVersion}:${projName}" > "<file>"`;
+      const releasedBinaryCmd = `git -C "${projectDir}" show "v${newVersion}:${projName}" > "<file>" (in cmd or Git Bash; Windows PowerShell 5.1 re-encodes > and corrupts the binary)`;
       if (args.prepareNext !== false) {
-        const nextVersion = nextBuild(newVersion);
         const hasDriveArchive = fs.existsSync(path.join(projectDir, 'drive-archive'));
         const releasedDrive = readMirrorVersion(mirrorDir).driveFile;
         const nextDrive = hasDriveArchive ? nextDriveFile(releasedDrive) : undefined;
+        let prepSaved = false;
+        let prepCommitted = false;
         try {
           const prepScript = scriptManager.prepareScriptWithHelpers(
             'bump_project_version',
@@ -7005,6 +7016,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           if (!prepRes.success || !prepRes.output.includes('SCRIPT_SUCCESS') || !prepared || cmpVersion(prepared, newVersion) <= 0) {
             log.push(`next build: NOT prepared (bump failed or gave ${prepared ?? 'nothing'}); the next download will report v${newVersion}`);
           } else {
+            prepSaved = true;
             const mirrorScript3 = scriptManager.prepareScriptWithHelpers(
               'mirror_export',
               { PROJECT_FILE_PATH: escaped, MIRROR_ROOT: mirrorDir },
@@ -7021,12 +7033,20 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
               `The working copy now carries the number the next release gives it, so\n` +
               `a PLC downloaded from it reports that number. v${newVersion} is released.\n`
             );
+            prepCommitted = true;
             if (doPush) execSync(`git -C "${projectDir}" push`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] });
             log.push(`next build: working copy prepared as v${prepared}${nextDrive ? ` / ${nextDrive}` : ''} (committed${doPush ? ' and pushed' : ''}, no tag). Downloads from now on report that number.`);
             log.push(`released binary: the .project on disk is now the prepared copy. Upload or archive the released one from the tag: ${releasedBinaryCmd}`);
           }
         } catch (e) {
-          log.push(`next build: NOT prepared (${e instanceof Error ? e.message : String(e)}); the next download will report v${newVersion}`);
+          const why = e instanceof Error ? e.message : String(e);
+          if (prepCommitted) {
+            log.push(`next build: prepared and committed, but the push failed (${why}). Push it by hand.`);
+          } else if (prepSaved) {
+            log.push(`next build: the .project on disk is already prepared (saved) but NOT committed (${why}). Commit ${mirrorDirName}/ and ${projName} as the preparation commit by hand, else the next release takes the saved bump for a binary change.`);
+          } else {
+            log.push(`next build: NOT prepared (${why}); the next download will report v${newVersion}`);
+          }
         }
       }
 
