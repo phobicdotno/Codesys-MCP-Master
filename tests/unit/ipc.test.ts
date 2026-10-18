@@ -161,6 +161,34 @@ describe('IpcClient', () => {
     });
   });
 
+  describe('progress restarts the timeout', () => {
+    let watcher: ChildProcess;
+    let shortClient: IpcClient;
+
+    beforeEach(async () => {
+      shortClient = new IpcClient({ baseDir: ipcDir, ...DEFAULT_IPC_CONFIG, commandTimeoutMs: 1500, maxPollIntervalMs: 200 });
+      await shortClient.ensureDirectories();
+      watcher = spawnMockWatcher(ipcDir);
+      await waitForReady(ipcDir);
+    });
+
+    afterEach(async () => {
+      try { await shortClient.sendTerminate(); await new Promise((r) => setTimeout(r, 500)); } catch { /* ignore */ }
+      try { watcher.kill(); } catch { /* ignore */ }
+    });
+
+    it('a script that reports progress may run past the timeout', async () => {
+      const script = ['import time', 'for i in range(6):', '    time.sleep(0.5)', "    mcp_progress('step %d' % i)", "print('SCRIPT_SUCCESS: done')"].join('\n');
+      const result = await shortClient.sendCommand(script);
+      expect(result.success).toBe(true);
+    });
+
+    it('a silent stretch still times out and names the last stage', async () => {
+      const script = ['import time', "mcp_progress('login and transfer')", 'time.sleep(3)', "print('SCRIPT_SUCCESS')"].join('\n');
+      await expect(shortClient.sendCommand(script)).rejects.toThrow(/since: login and transfer/);
+    });
+  });
+
   it('sendCommand timeout - no watcher', async () => {
     await client.ensureDirectories();
     const shortTimeoutClient = new IpcClient({

@@ -13,8 +13,10 @@
  * the next release gives it. At release time a working copy that is ahead of
  * the latest v* tag is released under its own number, without a second bump.
  */
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 export const VERSION_GVL_FILE = '_MCP_PROJECT_VERSION.st';
 
@@ -95,6 +97,57 @@ export function readMirrorVersion(mirrorDir: string): { version?: string; driveF
 export function isPreparedAhead(workingVersion: string | undefined, latestTag: string): boolean {
   if (!workingVersion || !/^v\d+(\.\d+){1,3}$/.test(latestTag)) return false;
   return cmpVersion(workingVersion, latestTag.slice(1)) > 0;
+}
+
+/**
+ * Facts for the download guard: is this working copy the next build that a
+ * release prepared, with nothing changed since? Then a download would put a
+ * number on the PLC that no release has: the released build is the tag.
+ */
+export interface PreparedState {
+  /** HEAD is a "Prepare v..." commit and the .project equals it. */
+  unchangedSincePreparation: boolean;
+  latestTag: string;
+  preparedVersion?: string;
+  preparedDriveFile?: string;
+}
+
+export function decideDownloadGuard(s: PreparedState): string | null {
+  if (!s.unchangedSincePreparation || !isPreparedAhead(s.preparedVersion, s.latestTag)) return null;
+  const next = `v${s.preparedVersion}${s.preparedDriveFile ? ` / ${s.preparedDriveFile}` : ''}`;
+  return (
+    `This working copy is the next build (${next}) that the release of ${s.latestTag} prepared, ` +
+    `and nothing has changed since. Downloading it would put a number on the PLC that no release has ` +
+    `(the code is ${s.latestTag}'s, the label is the next one).\n` +
+    `Download the released build instead: take it from the tag (git show ${s.latestTag}:<file>.project, ` +
+    `in cmd or Git Bash), put it in a scratch folder with the .codesys-version file, and download that copy. ` +
+    `Or make the change first: then the download carries ${next}, which the next release keeps.\n` +
+    `allowUnreleasedNumber: true downloads this copy anyway.`
+  );
+}
+
+/** Read the PreparedState of a project in a git repo; null outside git or without a tag. */
+export function readPreparedState(projectFile: string, mirrorDir: string): PreparedState | null {
+  const dir = path.dirname(projectFile);
+  const git = (args: string): string =>
+    execSync(`git -C "${dir}" ${args}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  try {
+    const latestTag = git('describe --tags --abbrev=0 --match "v*"');
+    const subject = git('log -1 --format=%s');
+    let unchanged = false;
+    if (/^Prepare v/.test(subject)) {
+      const committed = execSync(`git -C "${dir}" show "HEAD:${path.basename(projectFile)}"`, {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        maxBuffer: 512 * 1024 * 1024,
+      });
+      const hash = (b: Buffer) => crypto.createHash('sha256').update(b).digest('hex');
+      unchanged = hash(committed) === hash(fs.readFileSync(projectFile));
+    }
+    const v = readMirrorVersion(mirrorDir);
+    return { unchangedSincePreparation: unchanged, latestTag, preparedVersion: v.version, preparedDriveFile: v.driveFile };
+  } catch {
+    return null;
+  }
 }
 
 type Level = 'major' | 'minor' | 'revision' | 'build';

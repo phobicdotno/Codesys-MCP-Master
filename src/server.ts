@@ -44,7 +44,7 @@ import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
 import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isGatewayNotConfigured, gatewayLinkNote, runWithRecovery, hasGatewayLink, PreLoginCheck } from './online-diagnose';
 import { clearIdeDialogs } from './ide-dialogs';
-import { cmpVersion, isPreparedAhead, nextDriveFile, readMirrorVersion, withoutVersionGvl } from './next-version';
+import { cmpVersion, decideDownloadGuard, isPreparedAhead, nextDriveFile, readMirrorVersion, readPreparedState, withoutVersionGvl } from './next-version';
 
 /**
  * Executor used in persistent mode whenever the launcher isn't running yet:
@@ -5801,6 +5801,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       deviceUser: z.string().optional().describe("Device user account. Pre-registered via set_default_credentials so the modal Device User Login dialog is suppressed. Falls back to env CODESYS_DEVICE_USER."),
       devicePassword: z.string().optional().describe("Device user password. Falls back to env CODESYS_DEVICE_PASSWORD."),
       skipReachabilityCheck: z.boolean().optional().describe("If true, skip the verify_device_reachable pre-flight and go straight to login()/download(). Only use when the gateway/cache lookup is itself broken (e.g. CODESYS doesn't expose the gateway list on this SP). Default false."),
+      allowUnreleasedNumber: z.boolean().optional().describe("Download a working copy that is the next build a release prepared, with no change since. Refused by default: the PLC would report a number no release has; download the released build from the tag instead."),
     },
     async (args: { applicationPath?: string;
       projectFilePath: string;
@@ -5808,8 +5809,14 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       deviceUser?: string;
       devicePassword?: string;
       skipReachabilityCheck?: boolean;
+      allowUnreleasedNumber?: boolean;
     }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
+      if (!args.allowUnreleasedNumber) {
+        const prepared = readPreparedState(escaped, resolveMirrorRoot(escaped));
+        const refusal = prepared ? decideDownloadGuard(prepared) : null;
+        if (refusal) return { content: [{ type: 'text' as const, text: `download_to_device: refused.\n${refusal}` }], isError: true };
+      }
       const waitSec = args.loginWaitSeconds ?? 10;
       rememberDeviceCredentials(args.deviceUser, args.devicePassword, escaped);
       const deviceUser = args.deviceUser || rememberedDeviceUser(escaped);

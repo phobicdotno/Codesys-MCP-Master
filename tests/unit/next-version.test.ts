@@ -2,9 +2,10 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { execSync } from 'child_process';
 import {
   cmpVersion, nextBuild, nextDriveFile, parseVersionGvl, readMirrorVersion,
-  isPreparedAhead, withoutVersionGvl,
+  isPreparedAhead, withoutVersionGvl, decideDownloadGuard, readPreparedState,
 } from '../../src/next-version';
 
 describe('version-ahead helpers', () => {
@@ -62,5 +63,37 @@ describe('version-ahead helpers', () => {
       evidence: ['modified: mcp-mirror/A/_MCP_PROJECT_VERSION.st', 'added (untracked): mcp-mirror/A/FB_New.st'],
     });
     expect(real).toEqual({ kind: 'bump', level: 'minor', evidence: ['added (untracked): mcp-mirror/A/FB_New.st'] });
+  });
+});
+
+describe('download guard: prepared copy with no change', () => {
+  it('refuses only a prepared copy that is unchanged since the preparation', () => {
+    const base = { latestTag: 'v1.1.4.2', preparedVersion: '1.1.4.3', preparedDriveFile: 'P_003' };
+    const msg = decideDownloadGuard({ ...base, unchangedSincePreparation: true });
+    expect(msg).toMatch(/v1\.1\.4\.3 \/ P_003/);
+    expect(msg).toMatch(/git show v1\.1\.4\.2:/);
+    expect(decideDownloadGuard({ ...base, unchangedSincePreparation: false })).toBeNull();
+    expect(decideDownloadGuard({ ...base, preparedVersion: '1.1.4.2', unchangedSincePreparation: true })).toBeNull();
+  });
+
+  it('reads the state from a real repo', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nvg-'));
+    const g = (a: string) => execSync(`git -C "${dir}" ${a}`, { stdio: 'ignore' });
+    g('init -q'); g('config user.email t@example.com'); g('config user.name t');
+    const proj = path.join(dir, 'P.project');
+    const gvl = path.join(dir, 'mcp-mirror', 'App', '_MCP_PROJECT_VERSION.st');
+    fs.mkdirSync(path.dirname(gvl), { recursive: true });
+    fs.writeFileSync(proj, 'released');
+    fs.writeFileSync(gvl, "sVersion : STRING := '1.0.0.1';");
+    g('add -A'); g('commit -qm "release v1.0.0.1"'); g('tag -a v1.0.0.1 -m r');
+    fs.writeFileSync(proj, 'prepared');
+    fs.writeFileSync(gvl, "sVersion : STRING := '1.0.0.2';");
+    g('add -A'); g('commit -qm "Prepare v1.0.0.2 for the next download (not released)"');
+    const mirror = path.join(dir, 'mcp-mirror');
+    const s1 = readPreparedState(proj, mirror)!;
+    expect(s1).toMatchObject({ unchangedSincePreparation: true, latestTag: 'v1.0.0.1', preparedVersion: '1.0.0.2' });
+    expect(decideDownloadGuard(s1)).not.toBeNull();
+    fs.writeFileSync(proj, 'prepared and edited');
+    expect(decideDownloadGuard(readPreparedState(proj, mirror)!)).toBeNull();
   });
 });

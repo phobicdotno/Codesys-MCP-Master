@@ -2,14 +2,38 @@ import sys, scriptengine as script_engine, os, traceback
 
 LOGIN_WAIT_SECONDS = {LOGIN_WAIT_SECONDS}
 
+
+def _progress(stage):
+    # Each stage restarts the MCP's timeout (mcp_progress comes from the IPC
+    # preamble), so the timeout covers the transfer, not the open and build
+    # before it. Without the preamble (headless) this does nothing.
+    try:
+        mcp_progress(stage)
+    except NameError:
+        pass
+
+
 try:
     print("DEBUG: download_to_device script: Project='%s', LoginWaitSec=%d" % (
         PROJECT_FILE_PATH, LOGIN_WAIT_SECONDS))
     register_device_credentials_if_set()
     primary_project = ensure_project_open(PROJECT_FILE_PATH)
+    _progress('project open')
 
     online_app, target_app = ensure_online_connection(primary_project)
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
+
+    # Build first, as a stage of its own: login() builds anyway when the
+    # code is not current, and on a freshly opened project that took minutes
+    # of the download's time (2026-10-18). A build error still surfaces at
+    # login, so a failure here only logs.
+    _progress('build')
+    try:
+        target_app.build()
+        print("DEBUG: build() done before login")
+    except Exception as be:
+        print("DEBUG: build() before login failed (%s); login() builds instead" % be)
+    _progress('login and transfer')
 
     # Login. Same SP-version drift as connect_to_device: TryOnlineChange
     # is gone, login() now requires (OnlineChangeOption, bool) on SP21+.
@@ -92,6 +116,7 @@ try:
             pass
 
     # Download
+    _progress('download')
     print("DEBUG: Calling download()...")
     if hasattr(online_app, 'download'):
         online_app.download()

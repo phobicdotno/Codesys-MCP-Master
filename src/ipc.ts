@@ -10,6 +10,42 @@ import { IpcConfig, IpcResult, IpcCommand, RequestId } from './types';
 import { ipcLog } from './logger';
 
 /** Default IPC configuration */
+/**
+ * Python put in front of every script. A script calls mcp_progress('stage')
+ * when it reaches a new stage; every call appends a line to the progress
+ * file, and the wait for the result starts its timeout again from there.
+ * So a timeout measures how long a script has been silent, not how long
+ * it has run: a download that spent 8 of its 10 minutes opening, building
+ * and logging in no longer runs out of time during the transfer itself
+ * (2026-10-18). Valid in IronPython 2.7 and CPython 3.
+ */
+export function progressPreamble(progressFile: string): string {
+  return [
+    `MCP_PROGRESS_FILE = r'${progressFile.replace(/'/g, "\\'")}'`,
+    'def mcp_progress(stage):',
+    '    try:',
+    '        import time as _mcp_time',
+    "        _f = open(MCP_PROGRESS_FILE, 'a')",
+    "        _f.write('%.1f %s\\n' % (_mcp_time.time(), stage))",
+    '        _f.close()',
+    '    except Exception:',
+    '        pass',
+    '',
+    '',
+  ].join('\n');
+}
+
+/** Last stage line of a progress file ('' when there is none). */
+export function lastProgressStage(progressFile: string): string {
+  try {
+    const lines = fs.readFileSync(progressFile, 'utf-8').trim().split(/\r?\n/);
+    const last = lines[lines.length - 1] ?? '';
+    return last.replace(/^[0-9.]+\s+/, '');
+  } catch {
+    return '';
+  }
+}
+
 export const DEFAULT_IPC_CONFIG: Omit<IpcConfig, 'baseDir'> = {
   // Most tools first run ensure_project_open, which loads the project if it
   // is not open yet. That first load took 99 s on SP19 with the large add-on
@@ -135,11 +171,12 @@ export class IpcClient {
     const scriptPath = path.join(this.commandsDir, scriptFileName);
     const commandPath = path.join(this.commandsDir, commandFileName);
     const resultPath = path.join(this.resultsDir, resultFileName);
+    const progressPath = path.join(this.resultsDir, `${requestId}.progress`);
 
     ipcLog.debug(`Sending command ${requestId}`);
 
     // Step 1: Write .py script file with fsync
-    await atomicWrite(scriptPath, scriptContent);
+    await atomicWrite(scriptPath, progressPreamble(progressPath) + scriptContent);
 
     // Step 2: Write .command.json (triggers watcher)
     const command: IpcCommand = {
@@ -151,11 +188,23 @@ export class IpcClient {
 
     ipcLog.debug(`Command ${requestId} written, polling for result...`);
 
-    // Step 3: Poll for result with progressive backoff
-    const startTime = Date.now();
+    // Step 3: Poll for result with progressive backoff. The timeout runs
+    // from the last progress the script reported (see progressPreamble).
+    let startTime = Date.now();
     let pollInterval = this.config.pollIntervalMs;
+    let progressSize = -1;
 
     while (Date.now() - startTime < timeout) {
+      try {
+        const size = fs.statSync(progressPath).size;
+        if (size !== progressSize) {
+          progressSize = size;
+          startTime = Date.now();
+          ipcLog.debug(`Command ${requestId} progress: ${lastProgressStage(progressPath)}`);
+        }
+      } catch {
+        // no progress reported yet
+      }
       if (fs.existsSync(resultPath)) {
         // Try to read result with retry for partial writes
         const result = await this._readResultWithRetry(resultPath, requestId);
@@ -168,6 +217,7 @@ export class IpcClient {
               // Ignore cleanup errors
             }
           }
+          try { fs.unlinkSync(progressPath); } catch { /* none written */ }
           ipcLog.debug(
             `Command ${requestId} completed: success=${result.success}`
           );
@@ -187,9 +237,12 @@ export class IpcClient {
 
     // Timeout — clean up command files
     this._cleanupCommandFiles(requestId);
+    const stage = lastProgressStage(progressPath);
+    try { fs.unlinkSync(progressPath); } catch { /* none written */ }
 
     throw new Error(
-      `Command ${requestId} timed out after ${timeout}ms waiting for result`
+      `Command ${requestId} timed out after ${timeout}ms waiting for result` +
+        (stage ? ` (no progress for ${timeout}ms since: ${stage})` : '')
     );
   }
 
