@@ -105,7 +105,7 @@ export function isPreparedAhead(workingVersion: string | undefined, latestTag: s
  * number on the PLC that no release has: the released build is the tag.
  */
 export interface PreparedState {
-  /** HEAD is a "Prepare v..." commit and the .project equals it. */
+  /** The last commit of the .project is a "Prepare v..." commit and the file equals HEAD's. */
   unchangedSincePreparation: boolean;
   latestTag: string;
   preparedVersion?: string;
@@ -133,10 +133,13 @@ export function readPreparedState(projectFile: string, mirrorDir: string): Prepa
     execSync(`git -C "${dir}" ${args}`, { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   try {
     const latestTag = git('describe --tags --abbrev=0 --match "v*"');
-    const subject = git('log -1 --format=%s');
+    // The last commit that touched the .project, not HEAD: a vessel release is
+    // followed by a Drive / Changelog commit that leaves the binary alone.
+    const base = path.basename(projectFile);
+    const subject = git(`log -1 --format=%s -- "${base}"`);
     let unchanged = false;
     if (/^Prepare v/.test(subject)) {
-      const committed = execSync(`git -C "${dir}" show "HEAD:${path.basename(projectFile)}"`, {
+      const committed = execSync(`git -C "${dir}" show "HEAD:./${base}"`, {
         stdio: ['ignore', 'pipe', 'ignore'],
         maxBuffer: 512 * 1024 * 1024,
       });

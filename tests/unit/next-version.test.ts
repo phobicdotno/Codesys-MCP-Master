@@ -93,6 +93,10 @@ describe('download guard: prepared copy with no change', () => {
     const s1 = readPreparedState(proj, mirror)!;
     expect(s1).toMatchObject({ unchangedSincePreparation: true, latestTag: 'v1.0.0.1', preparedVersion: '1.0.0.2' });
     expect(decideDownloadGuard(s1)).not.toBeNull();
+    // A Drive / Changelog commit after the preparation leaves the binary alone.
+    fs.writeFileSync(path.join(dir, 'Changelog.md'), 'drive upload');
+    g('add -A'); g('commit -qm "Drive: P_001 uploaded"');
+    expect(decideDownloadGuard(readPreparedState(proj, mirror)!)).not.toBeNull();
     fs.writeFileSync(proj, 'prepared and edited');
     expect(decideDownloadGuard(readPreparedState(proj, mirror)!)).toBeNull();
   });
