@@ -51,7 +51,9 @@ describe('version-ahead helpers', () => {
   it('ignores the version GVL when classifying a prepared copy', () => {
     const only = withoutVersionGvl({
       kind: 'bump', level: 'revision',
-      evidence: ['baseline: tag v1.1.4.1', 'modified: mcp-mirror/Dev/Application/_MCP_PROJECT_VERSION.st'],
+      evidence: ['baseline: tag v1.1.4.1', 'modified: mcp-mirror/Dev/Application/_MCP_PROJECT_VERSION.st',
+        'modified: mcp-mirror/Project Information/GetVersion.st',
+        'modified: mcp-mirror/Project Information/GetVersionProperty.st'],
     });
     expect(only.kind).toBe('no-changes');
 

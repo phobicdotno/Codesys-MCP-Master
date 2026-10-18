@@ -104,13 +104,16 @@ export type Classification =
   | { kind: 'first-run'; evidence: string[] };
 
 /**
- * Drop the version GVL from a classification. In a prepared working copy the
+ * Drop the version files from a classification. In a prepared working copy the
  * GVL differs from the tag only because of the preparation, which is not a
  * code change. The level is recomputed from the remaining file lines.
  */
 export function withoutVersionGvl(c: Classification): Classification {
   if (c.kind === 'first-run') return c;
-  const isGvl = (e: string) => e.includes(VERSION_GVL_FILE);
+  // A bump also rewrites the version constants CODESYS generates under
+  // "Project Information" (GetVersion / GetVersionProperty).
+  const isGvl = (e: string) =>
+    e.includes(VERSION_GVL_FILE) || /Project Information\/GetVersion(Property)?\.st$/.test(e);
   const evidence = c.evidence.filter((e) => !isGvl(e));
   const files = evidence.filter((e) => /^(modified|added|deleted|renamed|added \(untracked\)): /.test(e));
   if (files.length === 0) return { kind: 'no-changes', evidence };
