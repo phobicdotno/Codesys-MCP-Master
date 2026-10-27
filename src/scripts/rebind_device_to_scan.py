@@ -10,7 +10,10 @@
 #   5. otherwise: refuse and dump the candidate list
 #
 # Once matched, call device.set_gateway_and_address(gateway, address) and
-# save the project so the rebind persists across CODESYS restarts.
+# save the project so the rebind persists across CODESYS restarts. An IP-form
+# address is first resolved to the PLC's node address through the gateway
+# (helper ip_direct_address), as the IDE does on Enter in Communication
+# Settings.
 
 import sys, scriptengine as script_engine, os, traceback, json
 
@@ -178,17 +181,43 @@ try:
     # and re-establish a live session, which login()/download() depend
     # on. Skipping when address matches leaves the binding stale.
     print("DEBUG: rebinding (cached='%s' new='%s' reason=%s)" % (cached_address, new_address, reason))
-    # IP-form addresses (e.g. '127.0.0.1:11740' for an SSH-tunnelled PLC) are
-    # not valid node addresses for set_gateway_and_address ("Invalid address
-    # format"). Use set_gateway_and_ip_address (ScriptDeviceObject, since
-    # 3.5.8.0) which takes "ip[:port]" and connects the block driver directly
-    # by IP -- no UDP discovery needed.
-    import re as _re
-    if _re.match(r'^\d{1,3}(\.\d{1,3}){3}(:\d+)?$', new_address):
-        print("DEBUG: IP-form address detected -> set_gateway_and_ip_address")
-        target.set_gateway_and_ip_address(gw, new_address)
+    # IP form ('ip[:port]', e.g. '127.0.0.1:11740' for an SSH tunnel or a PLC
+    # behind a VPN): do what the IDE does on Enter in Communication Settings.
+    # Look the IP up through the gateway (direct TCP, no UDP broadcast) and
+    # bind the node address the PLC answers with. set_gateway_and_ip_address
+    # alone leaves the old node address in place (see ip_direct_address.py),
+    # which is how a stale tunnel binding survived a "successful" rebind.
+    ip_form = parse_ip_form(new_address)
+    resolved = ''
+    if ip_form:
+        ip, port = ip_form
+        print("DEBUG: IP-form address -> direct lookup of %s:%d via gateway '%s'" % (ip, port, gw.name))
+        resolved, why = resolve_ip_direct(gw, ip, port)
+        if not resolved:
+            print("### REBIND_RESULT_START ###")
+            print(json.dumps({
+                "rebound": False,
+                "reason": "ip-lookup-failed",
+                "error": why,
+                "cached_address": cached_address,
+                "requested": "%s:%d" % (ip, port),
+                "gateway_used": "%s (%s)" % (gw.name, gw.guid),
+                "hint": ("No CODESYS runtime answered at %s:%d through gateway '%s'. Check the VPN or "
+                         "tunnel and that the runtime listens on that port, then rebind again. The "
+                         "binding was left unchanged." % (ip, port, gw.name)),
+            }, sort_keys=True))
+            print("### REBIND_RESULT_END ###")
+            print("SCRIPT_SUCCESS: rebind_device_to_scan completed (no rebind).")
+            sys.exit(0)
+        print("DEBUG: %s:%d answered as node address '%s'" % (ip, port, resolved))
+        target.set_gateway_and_address(gw, resolved)
     else:
         target.set_gateway_and_address(gw, new_address)
+
+    address_now = str(target.get_address())
+    want = resolved or new_address
+    if address_now.strip().upper() != want.strip().upper():
+        raise RuntimeError("Device address is '%s' after binding '%s'; the binding did not take." % (address_now, want))
     try:
         primary_project.save()
     except Exception as e:
@@ -203,7 +232,8 @@ try:
         "matched_candidate": pick,
         "gateway_used": "%s (%s)" % (gw.name, gw.guid),
         "device_gateway_now": str(target.get_gateway()),
-        "device_address_now": str(target.get_address()),
+        "device_address_now": address_now,
+        "resolved_address": resolved,
         "gateways_configured": ["%s (%s)" % (g.name, g.guid) for g in online.gateways],
     }, sort_keys=True))
     print("### REBIND_RESULT_END ###")

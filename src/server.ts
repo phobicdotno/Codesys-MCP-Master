@@ -5652,7 +5652,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'verify_device_reachable',
-    "Pre-flight check for download/connect: scans the gateway and reports whether the project's cached device address actually matches a live target. Returns reachable=true if the cached address is in the scan results, false otherwise (with the full candidate list so the caller can rebind). The download_to_device tool runs this automatically; you only need to call it directly when you want to know the state without committing to a download.",
+    "Pre-flight check for download/connect: scans the gateway and reports whether the project's cached device address actually matches a live target. Returns reachable=true if the cached address is in the scan results, false otherwise (with the full candidate list so the caller can rebind). A device bound by IP (TCP-direct node address from an IP rebind) is checked by a direct lookup of that IP instead of a scan: reachable=true only when the PLC answers with the bound node address; otherwise fresh_address and note say to rebind. The download_to_device tool runs this automatically; you only need to call it directly when you want to know the state without committing to a download.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       applicationPath: z.string().optional().describe(APP_PATH_DESC),
@@ -5662,7 +5662,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       const script = scriptManager.prepareScriptWithHelpers(
         'verify_device_reachable',
         { PROJECT_FILE_PATH: escaped, APPLICATION_PATH: appPathLiteral(args.applicationPath) },
-        ['ensure_project_open', 'select_application', 'find_target_device']
+        ['ensure_project_open', 'select_application', 'find_target_device', 'ip_direct_address']
       );
       const result = await executor.executeScript(script, 60_000);
       const success = result.success && result.output.includes('SCRIPT_SUCCESS');
@@ -5676,13 +5676,13 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'rebind_device_to_scan_result',
-    "Re-bind the project's configured device to a fresh scan result (typically same PLC, new gateway address after reboot/DHCP). Match priority: (1) matchName (exact, case-insensitive); (2) matchDeviceId; (3) matchAddress (forced, no scan); (4) with no criteria, the PLC the device was bound to before (its scanned device name). It never binds to 'the only scan result': on an office or vessel network that can be any PLC, so without criteria and no previous binding it refuses and lists the candidates. A project with no gateway yet uses the local gateway. If multiple ambiguous matches exist, refuses and returns the candidate list. On success, calls device.set_gateway_and_address() and saves the project.",
+    "Re-bind the project's configured device to a fresh scan result (typically same PLC, new gateway address after reboot/DHCP). Match priority: (1) matchName (exact, case-insensitive); (2) matchDeviceId; (3) matchAddress (forced, no scan); (4) with no criteria, the PLC the device was bound to before (its scanned device name). It never binds to 'the only scan result': on an office or vessel network that can be any PLC, so without criteria and no previous binding it refuses and lists the candidates. A project with no gateway yet uses the local gateway. If multiple ambiguous matches exist, refuses and returns the candidate list. On success, calls device.set_gateway_and_address() (an IP-form matchAddress is first resolved to the PLC's node address through the gateway), checks the device address took, and saves the project.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       applicationPath: z.string().optional().describe(APP_PATH_DESC),
       matchName: z.string().optional().describe("Match by device_name from the scan (exact, case-insensitive). E.g. 'codesys-pi'."),
       matchDeviceId: z.string().optional().describe("Match by device_id from the scan."),
-      matchAddress: z.string().optional().describe("Force a specific address. Either a router address (e.g. '0301.3053') or an IP-form address 'ip[:port]' (e.g. '127.0.0.1:11740' for an SSH-tunnelled PLC) -- IP form binds via set_gateway_and_ip_address, no UDP discovery needed. Skips the scan step entirely."),
+      matchAddress: z.string().optional().describe("Force a specific address. Either a router address (e.g. '0301.3053') or an IP-form address 'ip[:port]' (e.g. '127.0.0.1:11740' for an SSH-tunnelled PLC). IP form does what the IDE does on Enter in Communication Settings: a direct (unicast TCP) lookup of that IP through the gateway, then binds the node address the PLC answers with, so it works for a PLC behind a VPN or tunnel that no UDP scan can see. If nothing answers it returns rebound=false, reason 'ip-lookup-failed', and leaves the binding unchanged. Skips the scan step entirely."),
     },
     async (args: { applicationPath?: string; projectFilePath: string; matchName?: string; matchDeviceId?: string; matchAddress?: string }) => {
       const escaped = resolvePath(args.projectFilePath, workspaceDir);
@@ -5694,7 +5694,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
           MATCH_DEVICE_ID: args.matchDeviceId ?? '',
           MATCH_ADDRESS: args.matchAddress ?? '',
         },
-        ['ensure_project_open', 'select_application', 'find_target_device']
+        ['ensure_project_open', 'select_application', 'find_target_device', 'ip_direct_address']
       );
       const result = await executor.executeScript(script, 60_000);
       const success = result.success && result.output.includes('SCRIPT_SUCCESS');
@@ -5837,7 +5837,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
         const verifyScript = scriptManager.prepareScriptWithHelpers(
           'verify_device_reachable',
           { PROJECT_FILE_PATH: escaped, APPLICATION_PATH: appPathLiteral(args.applicationPath) },
-          ['ensure_project_open', 'select_application', 'find_target_device']
+          ['ensure_project_open', 'select_application', 'find_target_device', 'ip_direct_address']
         );
         const verifyResult = await executor.executeScript(verifyScript, 60_000);
         const verifySuccess = verifyResult.success && verifyResult.output.includes('SCRIPT_SUCCESS');
@@ -5859,6 +5859,8 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
                 content: [{
                   type: 'text' as const,
                   text: `Pre-flight FAILED: device at cached address '${json.cached_address}' is not reachable. ` +
+                    (json.note ? `${json.note}
+` : '') +
                     `Scan returned ${json.candidate_count ?? 0} candidate(s):\n${candidateList}\n\n` +
                     `Call rebind_device_to_scan_result (typically with matchName='${json.scanned_device_name || json.target_device_name || ''}') to update the binding, then retry. ` +
                     `Or pass skipReachabilityCheck=true to force the download anyway.`,

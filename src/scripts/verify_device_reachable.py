@@ -82,6 +82,46 @@ try:
         print("SCRIPT_SUCCESS: verify_device_reachable completed (bound by IP).")
         sys.exit(0)
 
+    # Bound to a TCP-direct node address (an IP rebind, as the IDE's Enter in
+    # Communication Settings makes): a UDP scan cannot see a PLC behind a VPN
+    # or tunnel, so ask the gateway for that IP directly instead. The answer
+    # must be the very same node address: the route prefix belongs to one
+    # gateway session, and a binding saved under another route fails at login
+    # with "No connection to the device. Please rescan your network."
+    direct = decode_ip_direct(cached_address)
+    if direct:
+        ip, port = direct
+        print("DEBUG: cached address is TCP-direct (%s:%d); direct lookup via '%s'" % (ip, port, gw.name))
+        fresh, why = resolve_ip_direct(gw, ip, port)
+        same = bool(fresh) and fresh.strip().upper() == cached_address.strip().upper()
+        if same:
+            note = "Direct lookup of %s:%d answered with the bound node address." % (ip, port)
+        elif fresh:
+            note = ("%s:%d answers as '%s' now, but the device is bound to '%s' (a route of an earlier "
+                    "gateway session). Rebind with matchAddress '%s:%d'." % (ip, port, fresh, cached_address, ip, port))
+        else:
+            note = "Direct lookup of %s:%d failed: %s" % (ip, port, why)
+        print("### DEVICE_REACHABILITY_START ###")
+        print(json.dumps({
+            "reachable": same,
+            "ip_bound": True,
+            "ip_address": "%s:%d" % (ip, port),
+            "fresh_address": fresh or '',
+            "note": note,
+            "cached_address": cached_address,
+            "target_device_name": str(target_name) if target_name else '',
+            "scanned_device_name": str(getattr(target, 'scanned_device_name', '') or ''),
+            "gateway_name": str(gw.name),
+            "gateway_guid": str(gw.guid),
+            "candidates": [],
+            "candidate_count": 0,
+            "matched": [],
+            "scan_source": "direct-ip",
+        }, sort_keys=True))
+        print("### DEVICE_REACHABILITY_END ###")
+        print("SCRIPT_SUCCESS: verify_device_reachable completed (direct IP lookup).")
+        sys.exit(0)
+
     # Pre-flight should not freeze the IDE UI for the duration of a live
     # network scan. Try the gateway's cached scan first (instant, no UI
     # block). Only fall back to a live scan if no cache exists.
