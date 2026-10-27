@@ -197,19 +197,38 @@ def enumerate_libraries(primary_project):
     return sorted(by_name.items())
 
 
-def build_version_gvl_declaration(version_str, libraries, drive_file=''):
+def attached_pragmas(existing_decl, var_name):
+    """Return the pragma lines ({attribute ...}) that sit directly above
+    var_name's declaration in the existing GVL text, so a regeneration keeps
+    attributes added by hand (e.g. init_on_onlchange). [] when there are none."""
+    lines = (existing_decl or '').splitlines()
+    decl = re.compile(r"^\s*%s\s*:" % re.escape(var_name))
+    for i, line in enumerate(lines):
+        if decl.match(line):
+            j = i
+            while j > 0 and re.match(r"^\s*\{.*\}\s*$", lines[j - 1]):
+                j -= 1
+            return ["    " + l.strip() for l in lines[j:i]]
+    return []
+
+
+def build_version_gvl_declaration(version_str, libraries, drive_file='',
+                                  existing_decl=''):
     """Build the _MCP_PROJECT_VERSION GVL: the sVersion anchor plus the library
     manifest as one scalar STRING per reference, where the VARIABLE NAME is the
     library namespace and the value is its resolved version (same self-describing
     style as sVersion -- each individually readable over the online protocol).
     uiLibraryCount holds the number of library entries."""
-    lines = [
-        "{attribute 'qualified_only'}",
-        "VAR_GLOBAL",
+    lines = ["{attribute 'qualified_only'}", "VAR_GLOBAL"]
+    lines += attached_pragmas(existing_decl, 'sVersion')
+    lines += [
         "    sVersion : STRING := '%s';" % version_str,
         "    // Drive export name for THIS build. Moved to the next number right",
         "    // after each release, so a download carries the name of the upload",
         "    // it becomes. The running PLC reports which Drive file it came from.",
+    ]
+    lines += attached_pragmas(existing_decl, 'sDriveFile')
+    lines += [
         "    sDriveFile : STRING := '%s';" % drive_file,
         "    // Library manifest - one STRING per library: the variable NAME is the",
         "    // library namespace, the value its resolved version. Maintained by",
@@ -356,7 +375,8 @@ def _maintain_version_gvl_in_app(primary_project, app, version_str):
             pass
     drive_file = next_drive_file_name(existing_decl, PROJECT_FILE_PATH)
     libraries = enumerate_libraries(primary_project)
-    decl = build_version_gvl_declaration(version_str, libraries, drive_file)
+    decl = build_version_gvl_declaration(version_str, libraries, drive_file,
+                                          existing_decl)
     print("DEBUG: library manifest: %d reference(s) enumerated for %s" % (
         len(libraries), VERSION_GVL_NAME))
     print("DEBUG: sDriveFile -> '%s'" % drive_file)
