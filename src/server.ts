@@ -4728,7 +4728,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'get_device_identification',
-    "Reads a device's identification (type/id/version from the device description) plus device_name, address, enabled and simulation state. Read-only.",
+    "Reads a device's identification (type/id/version from the device description) plus device_name, the stored Communication Settings binding (gateway, node address, and address_ip = the ip:port a TCP-direct binding points at, so the IP the project will log in to can be checked offline), enabled and simulation state. Read-only.",
     {
       projectFilePath: z.string().describe("Path to the project file."),
       devicePath: z.string().optional().describe("Tree path of the device. Omit for the first device."),
@@ -4738,7 +4738,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       const script = scriptManager.prepareScriptWithHelpers(
         'get_device_identification',
         { PROJECT_FILE_PATH: escaped, DEVICE_PATH: args.devicePath ? sanitizePouPath(args.devicePath) : '' },
-        DEVICE_HELPERS
+        [...DEVICE_HELPERS, 'ip_direct_address']
       );
       const result = await executor.executeScript(script);
       const success = result.success && result.output.includes('SCRIPT_SUCCESS');

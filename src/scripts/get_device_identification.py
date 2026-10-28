@@ -24,6 +24,28 @@ try:
             print("%s: %s" % (attr, getattr(device, attr)))
         except Exception:
             pass
+    # The stored Communication Settings binding: what a login uses. A TCP-direct
+    # node address (IP typed in Communication Settings + Enter, or an IP rebind)
+    # is decoded back to ip:port.
+    try:
+        print("gateway: %s" % device.get_gateway())
+    except Exception:
+        pass
+    try:
+        address = str(device.get_address())
+        print("address: %s" % address)
+        decoded = decode_ip_direct(address)
+        if decoded:
+            print("address_ip: %s:%d" % decoded)
+        elif address:
+            print("address_ip: <not an IP binding (scan/router address)>")
+    except Exception:
+        pass
+    for getter in ('get_ip_address', 'get_tracking_mode'):
+        try:
+            print("%s: %s" % (getter[4:], getattr(device, getter)()))
+        except Exception:
+            pass
     try:
         enabled = device.is_enabled()
         print("enabled: %s" % enabled)
