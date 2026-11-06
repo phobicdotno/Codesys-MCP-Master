@@ -44,6 +44,7 @@ import { writeLiveValues } from './live-values-write';
 import { LiveValuesPump } from './live-values-pump';
 import { loginFailureHint, preLoginProbe, rememberIpBinding, parseIpAddress, withNote, isGatewayNotConfigured, gatewayLinkNote, runWithRecovery, hasGatewayLink, PreLoginCheck } from './online-diagnose';
 import { clearIdeDialogs } from './ide-dialogs';
+import { plcVersionWarnings } from './login-warnings';
 import { cmpVersion, decideDownloadGuard, isPreparedAhead, nextDriveFile, readMirrorVersion, readPreparedState, withoutVersionGvl } from './next-version';
 
 /**
@@ -3303,7 +3304,7 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
 
   s.tool(
     'connect_to_device',
-    'Connects (logs in) to the PLC runtime for the active application. Requires a configured device/gateway in the project. ALWAYS pass deviceUser+devicePassword (or set CODESYS_DEVICE_USER/CODESYS_DEVICE_PASSWORD env vars in the MCP server config): they are pre-registered via ScriptOnline.set_default_credentials and the Device User Login dialog does not appear, so the agent logs in by itself. Do not warn the user about a login dialog or ask them to fill one in. If authentication fails, the error is "Invalid user authentication on the target" at the top of the output; fix the credentials.',
+    'Connects (logs in) to the PLC runtime for the active application WITHOUT downloading: it logs in with OnlineChangeOption.Keep ("login without any change"), so the PLC keeps its program even when this project differs from it; the reply then warns when _MCP_PROJECT_VERSION differs. To change the PLC use download_to_device. Requires a configured device/gateway in the project. ALWAYS pass deviceUser+devicePassword (or set CODESYS_DEVICE_USER/CODESYS_DEVICE_PASSWORD env vars in the MCP server config): they are pre-registered via ScriptOnline.set_default_credentials and the Device User Login dialog does not appear, so the agent logs in by itself. Do not warn the user about a login dialog or ask them to fill one in. If authentication fails, the error is "Invalid user authentication on the target" at the top of the output; fix the credentials.',
     {
       projectFilePath: z.string().describe("Path to the project file."),
       applicationPath: z.string().optional().describe(APP_PATH_DESC),
@@ -3331,7 +3332,10 @@ export async function startMcpServer(config: ServerConfig): Promise<void> {
       );
       // Tool-side timeout = wait window + 30s headroom for actual login work
       const ipcTimeoutMs = (waitSec + 30) * 1000;
-      return onlineReply(await runOnline(script, ipcTimeoutMs), prep, `Connected to device for ${args.projectFilePath}.`);
+      const connected = await runOnline(script, ipcTimeoutMs);
+      const versionWarnings = plcVersionWarnings(connected.result.output);
+      const warningText = versionWarnings.map((w) => `\n${w}`).join('');
+      return onlineReply(connected, prep, `Connected to device for ${args.projectFilePath}.${warningText}`);
     }
   );
 

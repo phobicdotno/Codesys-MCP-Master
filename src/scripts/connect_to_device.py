@@ -11,113 +11,15 @@ try:
     online_app, target_app = ensure_online_connection(primary_project)
     app_name = getattr(target_app, 'get_name', lambda: "Unknown")()
 
-    # Login to the device. The login() signature shifted across SPs:
-    #   - Older: login() with no args, or login(OnlineChangeOption.TryOnlineChange)
-    #   - SP21+/SP22: login(OnlineChangeOption, bool) -- two required positional
-    #     args, with several enum members renamed (TryOnlineChange removed).
-    # Probe what's available, then try a sequence of plausible call shapes.
-    print("DEBUG: Calling login() on online application...")
-    if not hasattr(online_app, 'login'):
-        raise TypeError("Online application does not support login().")
-
-    # Discover login-mode enum members defensively. Different SPs expose the
-    # enum under different names and different module locations:
-    #   - Pre-SP21: script_engine.OnlineChangeOption (TryOnlineChange / WithDownload / ...)
-    #   - SP21+:    script_engine.LoginMode (rebadged; some members renamed/removed)
-    #   - Some builds attach it to the online_app object instead.
-    # Probe every known location and merge the discovered members.
-    enum_sources = []
-    for src_name in ('LoginMode', 'OnlineChangeOption'):
-        if hasattr(script_engine, src_name):
-            try:
-                enum_sources.append((src_name, getattr(script_engine, src_name)))
-            except Exception:
-                pass
-    for src_name in ('LoginMode', 'OnlineChangeOption'):
-        if hasattr(online_app, src_name):
-            try:
-                enum_sources.append(('online_app.' + src_name, getattr(online_app, src_name)))
-            except Exception:
-                pass
-    if not enum_sources:
-        print("DEBUG: No login-mode enum found on script_engine or online_app -- relying on plain-bool fallbacks.")
-
-    # Priority order: prefer "no-download / online change" semantics (least
-    # invasive), then download variants, then null/none.
-    preferred_order = ('TryOnlineChange', 'OnlineChangeOnly', 'Try', 'OnlineChange',
-                       'WithDownload', 'ForceDownload', 'Download',
-                       'None_', 'None')
-
-    enum_candidates = []
-    seen_keys = set()
-    for src_name, oc in enum_sources:
-        try:
-            members = sorted([m for m in dir(oc) if not m.startswith('_')])
-        except Exception:
-            members = []
-        print("DEBUG: %s members: %s" % (src_name, members))
-        for preferred in preferred_order:
-            if preferred in members:
-                key = '%s.%s' % (src_name, preferred)
-                if key not in seen_keys:
-                    try:
-                        enum_candidates.append((key, getattr(oc, preferred)))
-                        seen_keys.add(key)
-                    except Exception:
-                        pass
-        for m in members:
-            key = '%s.%s' % (src_name, m)
-            if key not in seen_keys:
-                try:
-                    enum_candidates.append((key, getattr(oc, m)))
-                    seen_keys.add(key)
-                except Exception:
-                    pass
-
-    # Build call-shape candidates for login(): a list of (description, args-tuple).
-    call_shapes = []
-    for nm, val in enum_candidates:
-        # Two-arg shape (most common SP21+): (mode, force_download_bool).
-        call_shapes.append(("login(%s, False)" % nm, (val, False)))
-        call_shapes.append(("login(%s, True)" % nm, (val, True)))
-        # One-arg shape (older).
-        call_shapes.append(("login(%s)" % nm, (val,)))
-    # Three-arg shape some builds use: (mode, secondary-mode, bool). Try with
-    # the strongest "do nothing" pair we can find at the front of candidates.
-    if enum_candidates:
-        first_nm, first_val = enum_candidates[0]
-        call_shapes.append(("login(%s, %s, False)" % (first_nm, first_nm), (first_val, first_val, False)))
-    # Also try plain bools and no-arg as fall-backs (for very old SPs).
-    call_shapes.append(("login(False)", (False,)))
-    call_shapes.append(("login(True)", (True,)))
-    call_shapes.append(("login()", ()))
-
-    last_err = None
-    logged_in = False
-    for desc, args in call_shapes:
-        try:
-            online_app.login(*args)
-            print("DEBUG: %s succeeded" % desc)
-            logged_in = True
-            break
-        except Exception as e:
-            last_err = e
-            # Print only the short error to keep log readable
-            print("DEBUG: %s failed: %s: %s" % (desc, type(e).__name__, e))
-            # A TypeError means this call shape does not fit the SP's login()
-            # signature: try the next one. Any other exception means the shape
-            # was accepted and the login itself failed (no gateway, refused,
-            # K-bus mismatch, a prompt answered by the script engine). Stop
-            # there: every further accepted shape logs in again and can run a
-            # full download each time and keeps the IDE busy for minutes.
-            # (A single full download over a slow tunnel already takes about
-            # two minutes and the PLC logs one "Download successful" line per
-            # chunk, every few seconds: that is not a loop.)
-            if not isinstance(e, TypeError):
-                break
-
-    if not logged_in:
-        raise RuntimeError("Login failed: %s" % last_err)
+    # Login WITHOUT download (OnlineChangeOption.Keep only, see
+    # login_without_download in ensure_online_connection.py). A connect never
+    # changes the program on the PLC, also when this project differs from it;
+    # it warns instead. Changing the PLC is download_to_device's job.
+    print("DEBUG: Calling login() on online application (Keep, no download)...")
+    login_without_download(online_app, "connect_to_device")
+    version_warning = warn_if_plc_runs_other_version(online_app, target_app, "connect_to_device")
+    if version_warning:
+        print(version_warning)
     print("DEBUG: login() returned. Waiting up to %d seconds for state to stabilise" % LOGIN_WAIT_SECONDS)
 
     # Poll application_state. login() may return before the application
@@ -143,6 +45,8 @@ try:
 
     print("Connected to device for application: %s" % app_name)
     print("Application State: %s" % state)
+    if version_warning:
+        print(version_warning)
     print("SCRIPT_SUCCESS: Connected to device successfully.")
     sys.exit(0)
 except Exception as e:

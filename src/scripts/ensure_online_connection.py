@@ -187,6 +187,93 @@ def _ensure_device_connected(primary_project, target_app=None):
 
 
 # --- Function to ensure the online application is logged in ---
+# Login modes that never change the program on the PLC. CODESYS OnlineChangeOption
+# (SP21: Force, Keep, Never, Try): Try = online change if possible, else a FULL
+# DOWNLOAD; Never = full download; Force = forced online change; Keep = "login
+# without any change", the PLC keeps its program. Every tool that only looks
+# at the PLC or starts/stops it must log in with Keep. Changing the program is
+# download_to_device's job, which has its own login. (2026-11: a connect with a
+# project that differed from the running application logged in with Try, ran a
+# full download, and left the application in STOP without a boot application.)
+NO_DOWNLOAD_LOGIN_MODES = ('Keep',)
+
+
+def login_without_download(online_app, log_prefix="login"):
+    """Log in with OnlineChangeOption.Keep only. Refuses when this CODESYS has
+    no Keep mode instead of falling back to a mode that can download. A real
+    login failure (refused, no connection) is raised as it comes."""
+    import scriptengine as _se_l
+    sources = []
+    for holder in (_se_l, online_app):
+        for src_name in ('OnlineChangeOption', 'LoginMode'):
+            if hasattr(holder, src_name):
+                try:
+                    sources.append(getattr(holder, src_name))
+                except Exception:
+                    pass
+    keep = None
+    for oc in sources:
+        for nm in NO_DOWNLOAD_LOGIN_MODES:
+            if hasattr(oc, nm):
+                try:
+                    keep = getattr(oc, nm)
+                except Exception:
+                    keep = None
+            if keep is not None:
+                break
+        if keep is not None:
+            break
+    if keep is None:
+        raise RuntimeError(
+            "%s: this CODESYS offers no 'Keep' login mode. Refusing to log in: every other "
+            "mode can download the project to the PLC. Use download_to_device to change the PLC." % log_prefix)
+    last_err = None
+    # (Keep, False): SP21+ login(OnlineChangeOption, bool); the bool stays False
+    # (True would delete other applications on the device). (Keep,): older SPs.
+    for desc, args in (("login(Keep, False)", (keep, False)), ("login(Keep)", (keep,))):
+        try:
+            online_app.login(*args)
+            print("DEBUG: %s: %s succeeded (no download, the PLC keeps its program)" % (log_prefix, desc))
+            return
+        except TypeError as e:
+            # this call shape does not fit this SP's login(): try the next one
+            last_err = e
+    raise RuntimeError("%s: login() takes neither (Keep, False) nor (Keep): %s" % (log_prefix, last_err))
+
+
+def warn_if_plc_runs_other_version(online_app, target_app, log_prefix="connect"):
+    """After a Keep login: compare _MCP_PROJECT_VERSION.sVersion on the PLC with
+    the project's. Returns a warning text when they differ, else ''. Silent
+    when the project has no version GVL or the value cannot be read."""
+    import re as _re
+    ide_version = None
+    try:
+        for obj in target_app.get_children(True):
+            try:
+                if obj.get_name() != '_MCP_PROJECT_VERSION' or not hasattr(obj, 'textual_declaration'):
+                    continue
+                m = _re.search(r"sVersion\s*:\s*STRING[^:]*:=\s*'([^']*)'", obj.textual_declaration.text)
+                if m:
+                    ide_version = m.group(1)
+                    break
+            except Exception:
+                continue
+    except Exception:
+        return ''
+    if not ide_version:
+        return ''
+    try:
+        plc_version = str(online_app.read_value('_MCP_PROJECT_VERSION.sVersion')).strip().strip("'")
+    except Exception as e:
+        print("DEBUG: %s: could not read _MCP_PROJECT_VERSION.sVersion on the PLC: %s" % (log_prefix, e))
+        return ''
+    if plc_version == ide_version:
+        return ''
+    return ("WARNING: the PLC runs version %s, this project is %s. Logged in WITHOUT download (Keep): "
+            "the PLC keeps its program, and variables that differ between the two may not read. "
+            "Use download_to_device to change the PLC." % (plc_version, ide_version))
+
+
 def ensure_logged_in(online_app, login_wait_seconds=30):
     """Idempotently log into the device. In persistent mode the login state
     survives across calls and this is a no-op via online_app.is_logged_in.
@@ -198,11 +285,8 @@ def ensure_logged_in(online_app, login_wait_seconds=30):
     fail in headless mode with 'Application not logged in.' (start/stop) or
     'Invalid expression' (read/write).
 
-    Mirrors the SP-version-drift login probe in connect_to_device.py:
-    OnlineChangeOption (older) vs LoginMode (SP21+) vs members on the
-    online_app object itself; (mode, force_download_bool) two-arg shape vs
-    (mode,) one-arg shape vs no-arg fallback. Prefers least-invasive
-    'TryOnlineChange' / 'OnlineChangeOnly' semantics."""
+    Logs in with OnlineChangeOption.Keep only (login_without_download): it
+    never downloads, also when the project differs from the PLC."""
     import scriptengine as _se  # local import; ensure_online_connection.py
                                 # is concatenated into the script body so
                                 # the top-level import in the main script
@@ -219,85 +303,8 @@ def ensure_logged_in(online_app, login_wait_seconds=30):
     if not hasattr(online_app, 'login'):
         raise TypeError("Online application does not support login().")
 
-    # Build enum candidate list -- same logic as connect_to_device.py's
-    # main body, kept here so headless tool calls don't have to
-    # re-implement it. Probe both script_engine.* and online_app.* for
-    # LoginMode / OnlineChangeOption.
-    enum_sources = []
-    for src_name in ('LoginMode', 'OnlineChangeOption'):
-        if hasattr(_se, src_name):
-            try:
-                enum_sources.append((src_name, getattr(_se, src_name)))
-            except Exception:
-                pass
-    for src_name in ('LoginMode', 'OnlineChangeOption'):
-        if hasattr(online_app, src_name):
-            try:
-                enum_sources.append(('online_app.' + src_name, getattr(online_app, src_name)))
-            except Exception:
-                pass
-
-    preferred_order = ('TryOnlineChange', 'OnlineChangeOnly', 'Try', 'OnlineChange',
-                       'WithDownload', 'ForceDownload', 'Download',
-                       'None_', 'None')
-    enum_candidates = []
-    seen_keys = set()
-    for src_name, oc in enum_sources:
-        try:
-            members = sorted([m for m in dir(oc) if not m.startswith('_')])
-        except Exception:
-            members = []
-        for preferred in preferred_order:
-            if preferred in members:
-                key = '%s.%s' % (src_name, preferred)
-                if key not in seen_keys:
-                    try:
-                        enum_candidates.append((key, getattr(oc, preferred)))
-                        seen_keys.add(key)
-                    except Exception:
-                        pass
-        for m in members:
-            key = '%s.%s' % (src_name, m)
-            if key not in seen_keys:
-                try:
-                    enum_candidates.append((key, getattr(oc, m)))
-                    seen_keys.add(key)
-                except Exception:
-                    pass
-
-    call_shapes = []
-    for nm, val in enum_candidates:
-        call_shapes.append(("login(%s, False)" % nm, (val, False)))
-        call_shapes.append(("login(%s, True)" % nm, (val, True)))
-        call_shapes.append(("login(%s)" % nm, (val,)))
-    call_shapes.append(("login(False)", (False,)))
-    call_shapes.append(("login(True)", (True,)))
-    call_shapes.append(("login()", ()))
-
-    last_err = None
-    # The error that matters is a real login refusal (wrong credentials,
-    # version mismatch), not the TypeError of a call shape this SP does not
-    # take, which the old message showed ("login() takes exactly 2 arguments").
-    login_err = None
-    logged_in = False
-    for desc, args in call_shapes:
-        try:
-            online_app.login(*args)
-            print("DEBUG: ensure_logged_in: %s succeeded" % desc)
-            logged_in = True
-            break
-        except TypeError as e:
-            last_err = e
-        except Exception as e:
-            # The shape was accepted and the login failed: stop. Trying the
-            # remaining shapes (Force/Keep/Never) logs in again and can run a
-            # full download per attempt while the IDE stays busy.
-            last_err = e
-            login_err = e
-            break
-
-    if not logged_in:
-        raise RuntimeError("Login to the PLC failed: %s" % (login_err or last_err))
+    # Keep only: never a download from a read, write or start/stop (see login_without_download)
+    login_without_download(online_app, "ensure_logged_in")
 
     # Settle wait. Same STABLE_STATES as connect_to_device.
     STABLE_STATES = ('run', 'stop', 'connected', 'halt', 'breakpoint')
