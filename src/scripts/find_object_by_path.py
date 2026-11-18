@@ -60,7 +60,12 @@ def find_object_by_path_robust(start_node, full_path, target_type_name="object")
     # Traverse the remaining path parts
     parent_path_str = getattr(current_obj, 'get_name', lambda: str(current_obj))() # Safer name getting
 
+    i = -1
+    skip_to = 0
+    final_name_override = None
     for i, part_name in enumerate(path_parts):
+        if i < skip_to:
+            continue
         is_last_part = (i == len(path_parts) - 1)
         print("DEBUG: Searching for part [%d/%d]: '%s' under '%s'" % (i+1, len(path_parts), part_name, parent_path_str))
         found_in_parent = None
@@ -69,6 +74,7 @@ def find_object_by_path_robust(start_node, full_path, target_type_name="object")
             children_of_current = current_obj.get_children(False)
             print("DEBUG: Found %d direct children under '%s'." % (len(children_of_current), parent_path_str))
             child_names = []
+            consumed = 1
             for child in children_of_current:
                  child_name = getattr(child, 'get_name', lambda: None)() # Safer name getting
                  child_names.append(repr(child_name))
@@ -76,6 +82,20 @@ def find_object_by_path_robust(start_node, full_path, target_type_name="object")
                      found_in_parent = child
                      print("DEBUG: Found direct child matching '%s'." % part_name)
                      break # Found direct child, stop searching children
+            if not found_in_parent:
+                 # A name that itself holds '/' or '.' (a folder 'Remote / Radio', 'v1.2') was split
+                 # into several parts by the normalisation above: match it against the joined parts.
+                 for child in children_of_current:
+                     child_name = getattr(child, 'get_name', lambda: None)()
+                     if not child_name or ('/' not in child_name and '.' not in child_name):
+                         continue
+                     norm = child_name.replace('\\', '/').replace('.', '/')
+                     n = len(norm.split('/'))
+                     if i + n <= len(path_parts) and '/'.join(path_parts[i:i + n]) == norm:
+                         found_in_parent = child
+                         consumed = n
+                         print("DEBUG: Found direct child '%s' spanning %d path parts." % (child_name, n))
+                         break
             if not found_in_parent:
                  # Print what IS there so a failed match is diagnosable from the log
                  print("DEBUG: No direct child named '%s'. Children of '%s': %s" % (part_name, parent_path_str, ", ".join(child_names)))
@@ -93,6 +113,9 @@ def find_object_by_path_robust(start_node, full_path, target_type_name="object")
 
             # Update current object if found
             if found_in_parent:
+                skip_to = i + consumed
+                if skip_to >= len(path_parts):
+                    final_name_override = getattr(found_in_parent, 'get_name', lambda: None)()
                 current_obj = found_in_parent
                 parent_path_str = getattr(current_obj, 'get_name', lambda: part_name)() # Safer name getting
                 print("DEBUG: Stepped into '%s'." % parent_path_str)
@@ -109,7 +132,7 @@ def find_object_by_path_robust(start_node, full_path, target_type_name="object")
     # Final verification: compare against the NORMALIZED last segment.
     # full_path.split('/')[-1] would return the whole dot-separated path
     # (e.g. 'Application.MyPOU') as one piece and wrongly fail the check.
-    final_expected_name = path_parts[-1]
+    final_expected_name = final_name_override or path_parts[-1]
     found_final_name = getattr(current_obj, 'get_name', lambda: None)() # Safer name getting
 
     if found_final_name == final_expected_name:
