@@ -45,9 +45,11 @@ export class HeadlessExecutor implements ScriptExecutor {
     const codesysDir = path.dirname(this.config.codesysPath);
 
     try {
-      // Write script to temp file
+      // Write script to temp file as UTF-8: scripts embed user-supplied
+      // paths and names, which can be non-ASCII, and latin1 truncated every
+      // character above U+00FF to its low byte (2026-11-26).
       const normalized = scriptContent.replace(/\r\n/g, '\n');
-      fs.writeFileSync(tempFilePath, normalized, 'latin1');
+      fs.writeFileSync(tempFilePath, normalized, 'utf-8');
       headlessLog.debug(`Temp script written: ${tempFilePath}`);
 
       // Build command
